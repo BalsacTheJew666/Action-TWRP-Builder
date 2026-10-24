@@ -75,3 +75,21 @@ private logs, secrets, personal paths, or firmware backups in this branch.
   and test with a recovery route. NetHunter app, root and firmware are separate.
 - Do **not** use `fastboot flash recovery`; this platform uses vendor_boot
   for recovery. The build experiment never invokes fastboot.
+
+## Build #1 failure and ThinLTO retry
+
+- Run: https://github.com/BalsacTheJew666/Action-TWRP-Builder/actions/runs/40060693548
+- GitHub runner completed source checkout and passed all 21 NetHunter-related
+  configuration checks. Kernel compilation reached `LTO vmlinux.o`.
+- It then received a hosted-runner shutdown signal (exit 143), and
+  GitHub reported lost communication. This is **not** a confirmed compiler
+  error; memory exhaustion is a plausible, but unproven, root cause.
+- Original upstream GKI defconfig uses `CONFIG_LTO_CLANG_FULL=y` and
+  `CONFIG_CFI_CLANG=y`. Motorola Kconfig explicitly warns that Full LTO
+  can use large RAM and be much slower than ThinLTO.
+- Retry script now selects `CONFIG_LTO_CLANG_THIN=y` and checks that
+  `CONFIG_CFI_CLANG=y` remains enabled. It fails if Kconfig rejects these.
+- The revised workflow emits periodic free-memory, disk, top-RSS process,
+  and cgroup memory-event telemetry in GitHub's live job log.
+- ThinLTO/CFI may change binary and vendor-module compatibility; output
+  remains strictly **NOT FLASHABLE** pending firmware-specific validation.
