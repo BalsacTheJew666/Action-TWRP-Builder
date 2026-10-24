@@ -51,6 +51,9 @@ if [[ "$ENABLE_WIFI" == true ]]; then
   )
 fi
 
+# Use ThinLTO instead of RAM-intensive Full LTO while retaining CFI.
+scripts/config --file "$OUT_DIR/.config" --disable LTO_CLANG_FULL
+scripts/config --file "$OUT_DIR/.config" --enable LTO_CLANG_THIN
 echo "=== Requesting NetHunter features in generated configuration ==="
 for sym in "${enable[@]}"; do
   scripts/config --file "$OUT_DIR/.config" --enable "$sym"
@@ -73,6 +76,12 @@ if ((failed)); then
   exit 2
 fi
 
+for sym in LTO_CLANG_THIN CFI_CLANG; do
+  grep -qx "CONFIG_${sym}=y" "$OUT_DIR/.config" || {
+    echo "::error::CONFIG_${sym} not enabled after olddefconfig"; exit 2;
+  }
+done
+grep -qx "CONFIG_LTO_CLANG_FULL=y" "$OUT_DIR/.config" && { echo "::error::Full LTO still active"; exit 2; }
 echo "=== Build ARM64 kernel (test only) ==="
 make -j2 "${build_args[@]}" Image.gz
 make -s "${build_args[@]}" kernelrelease > "$OUT_DIR/kernelrelease.txt"
