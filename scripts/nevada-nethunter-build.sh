@@ -16,7 +16,7 @@ git log -1 --format='%H %s'
 head -n 6 Makefile
 grep -E '^(ARCH|LLVM|KERNEL_DIR)=' build.config.mtk.aarch64
 
-if [[ -n "$PATCH_DIR" ]]; then
+if [[ -n "$PATCH_DIR" && -d "$PATCH_DIR" ]]; then
   PATCH_DIR="$(cd "$PATCH_DIR" && pwd)"
   shopt -s nullglob
   patches=("$PATCH_DIR"/*.patch)
@@ -77,7 +77,7 @@ echo "=== Build ARM64 kernel (test only) ==="
 make -j2 "${build_args[@]}" Image.gz
 make -s "${build_args[@]}" kernelrelease > "$OUT_DIR/kernelrelease.txt"
 test -s "$OUT_DIR/arch/arm64/boot/Image.gz"
-sha256sum "$OUT_DIR/arch/arm64/boot/Image.gz" > "$OUT_DIR/Image.gz.sha256"
+(cd "$OUT_DIR/arch/arm64/boot" && sha256sum Image.gz) > "$OUT_DIR/Image.gz.sha256"
 echo "=== Build completed; NOT a flashable boot.img or vendor_boot.img ==="
 cat "$OUT_DIR/kernelrelease.txt"
 cat "$OUT_DIR/Image.gz.sha256"
