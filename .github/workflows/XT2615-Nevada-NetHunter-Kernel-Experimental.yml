@@ -70,6 +70,7 @@ jobs:
           echo "Confirmed Motorola kernel revision: $actual"
 
       - name: Apply NetHunter configuration and compile test kernel
+        timeout-minutes: 120
         shell: bash
         env:
           KERNEL_DIR: ${{ runner.temp }}/nevada-kernel
@@ -77,7 +78,27 @@ jobs:
           PATCH_DIR: ${{ github.workspace }}/nevada-nethunter-patches
         run: |
           set -euo pipefail
+          # Emit diagnostics periodically, including while LLVM is linking.
+          # If the hosted runner disappears, at least earlier telemetry
+          # will have been streamed to GitHub's job logs.
+          monitor() {
+            while :; do
+              echo "=== Runner resources $(date -u +%FT%TZ) ==="
+              free -m
+              df -h "$RUNNER_TEMP"
+              if [[ -r /sys/fs/cgroup/memory.events ]]; then
+                cat /sys/fs/cgroup/memory.events
+              fi
+              ps -eo pid,comm,rss --sort=-rss | head -n 8 || true
+              sleep 60
+            done
+          }
+          monitor &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
           bash scripts/nevada-nethunter-build.sh 2>&1 | tee "$RUNNER_TEMP/nevada-build.log"
+          kill "$monitor_pid" 2>/dev/null || true
+          trap - EXIT
 
       - name: Package experimental results (NOT a flashable image)
         if: success()
