@@ -237,6 +237,40 @@ jobs:
           echo "Firmware-matched 5.15.180 overlay applied successfully."
           df -h /
 
+      - name: Quote multiword vendor kernel cmdline for mkbootimg
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The pinned Nevada tree expands BOARD_VENDOR_CMDLINE unquoted.
+          # With the stock W1WNS36.18-114-1 overlay, the three extra kernel
+          # parameters become unexpected positional arguments to mkbootimg.
+          # Quote only the Makefile argument expansion; retain every kernel
+          # parameter exactly as supplied by the firmware-matched overlay.
+          python3 - <<'PY'
+          from pathlib import Path
+          import shlex
+          p=Path("twrp/device/motorola/nevada/BoardConfig.mk")
+          src=p.read_text()
+          before='BOARD_MKBOOTIMG_ARGS += --vendor_cmdline $(BOARD_VENDOR_CMDLINE)'
+          after='BOARD_MKBOOTIMG_ARGS += --vendor_cmdline "$(BOARD_VENDOR_CMDLINE)"'
+          count=src.count(before)
+          if count != 1:
+              raise SystemExit(f"Unsafe vendor_cmdline patch: expected exactly one unquoted line, found {count}")
+          cmdlines=[line for line in src.splitlines()
+                    if line.strip().startswith("BOARD_VENDOR_CMDLINE")]
+          if not cmdlines:
+              raise SystemExit("No BOARD_VENDOR_CMDLINE setting in BoardConfig")
+          for parameter in ("bootopt=64S3,32N2,64N2", "mem.enable_mglru=1",
+                            "loglevel=4", "initcall_debug=0"):
+              if not any(parameter in line for line in cmdlines):
+                  raise SystemExit(f"Missing expected firmware vendor_cmdline parameter: {parameter}")
+          p.write_text(src.replace(before,after,1))
+          example="bootopt=64S3,32N2,64N2 mem.enable_mglru=1 loglevel=4 initcall_debug=0"
+          args=shlex.split('--vendor_cmdline "'+example+'" --pagesize 4096')
+          assert args==['--vendor_cmdline',example,'--pagesize','4096']
+          print("Fixed mkbootimg vendor_cmdline quoting without changing its parameter values.")
+          PY
+
       - name: Compile vendor_boot image (serial, guarded)
         shell: bash
         timeout-minutes: 150
