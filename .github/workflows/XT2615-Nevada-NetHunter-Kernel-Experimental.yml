@@ -1,0 +1,113 @@
+name: XT2615-1 Nevada NetHunter Kernel (experimental)
+
+# Not automatic: separate from the working TWRP pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      external_wifi:
+        description: 'Compile in-tree USB Wi-Fi driver support (may require Kconfig fixes)'
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-nethunter-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    env:
+      MOTOROLA_BRANCH: android-16-release-w1wn36.18-114
+      MOTOROLA_COMMIT: 0fa176ca7f56c349b51acd83684284c02ced5854
+      DEBIAN_FRONTEND: noninteractive
+      ENABLE_WIFI: ${{ inputs.external_wifi }}
+    steps:
+      - name: Check out test scripts only
+        uses: actions/checkout@v4
+
+      - name: Inspect runner and free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          free -h
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install LLVM toolchain and kernel dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4
+          clang --version | head -n 1
+          ld.lld --version
+
+      - name: Fetch pinned public Motorola source (no proprietary overlays)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --filter=blob:none \
+            -b "$MOTOROLA_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/nevada-kernel"
+          actual="$(git -C "$RUNNER_TEMP/nevada-kernel" rev-parse HEAD)"
+          if [[ "$actual" != "$MOTOROLA_COMMIT" ]]; then
+            echo "::error::Upstream branch moved. Expected $MOTOROLA_COMMIT; got $actual"
+            exit 1
+          fi
+          echo "Confirmed Motorola kernel revision: $actual"
+
+      - name: Apply NetHunter configuration and compile test kernel
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/nevada-kernel
+          OUT_DIR: ${{ runner.temp }}/nevada-out
+          PATCH_DIR: ${{ github.workspace }}/nevada-nethunter-patches
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-nethunter-build.sh 2>&1 | tee "$RUNNER_TEMP/nevada-build.log"
+
+      - name: Package experimental results (NOT a flashable image)
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nevada-package"
+          cp "$RUNNER_TEMP/nevada-out/.config" "$RUNNER_TEMP/nevada-package/config.nethunter"
+          cp "$RUNNER_TEMP/nevada-out/config.stock-gki" "$RUNNER_TEMP/nevada-package/"
+          cp "$RUNNER_TEMP/nevada-out/kernelrelease.txt" "$RUNNER_TEMP/nevada-package/"
+          cp "$RUNNER_TEMP/nevada-out/arch/arm64/boot/Image.gz" "$RUNNER_TEMP/nevada-package/"
+          cp "$RUNNER_TEMP/nevada-out/Image.gz.sha256" "$RUNNER_TEMP/nevada-package/"
+          printf '%s\n' 'EXPERIMENTAL KERNEL IMAGE ONLY — DO NOT FLASH.' \
+            'NOT boot.img, NOT vendor_boot.img, NOT matched to 5.15.189.' \
+            'Before packaging, validate current firmware, ABI, vendor modules, DTB and AVB.' \
+            > "$RUNNER_TEMP/nevada-package/NOT-FLASHABLE.txt"
+
+      - name: Upload public-source experiment output
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-nethunter-NOT-FLASHABLE
+          path: ${{ runner.temp }}/nevada-package/
+          retention-days: 7
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-nethunter-build-logs
+          path: ${{ runner.temp }}/nevada-build.log
+          if-no-files-found: ignore
+          retention-days: 7
