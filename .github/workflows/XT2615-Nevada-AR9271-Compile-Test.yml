@@ -1,0 +1,93 @@
+name: XT2615-1 Nevada - AR9271 USB WiFi Compile Test
+
+# Manual-only, source-level build experiment. No boot image packaging or flashing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-ar9271-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ar9271-module-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    env:
+      MOTOROLA_BRANCH: android-16-release-w1wn36.18-114
+      MOTOROLA_COMMIT: 0fa176ca7f56c349b51acd83684284c02ced5854
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Install build requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift || true
+          sudo apt-get clean
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4
+          clang --version | head -n 1
+          free -h
+          df -h /
+
+      - name: Checkout pinned Motorola kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --filter=blob:none \
+            --branch "$MOTOROLA_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/nevada-kernel"
+          actual="$(git -C "$RUNNER_TEMP/nevada-kernel" rev-parse HEAD)"
+          test "$actual" = "$MOTOROLA_COMMIT" || {
+            echo "::error::Source revision changed: expected $MOTOROLA_COMMIT, got $actual"
+            exit 1
+          }
+
+      - name: Compile AR9271 module group with temporary wireless dependencies
+        timeout-minutes: 120
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/nevada-kernel
+          OUT_DIR: ${{ runner.temp }}/nevada-ar9271-out
+        run: |
+          set -euo pipefail
+          monitor() {
+            while :; do
+              echo "=== Runner resources $(date -u +%FT%TZ) ==="
+              free -m
+              df -h "$RUNNER_TEMP" | tail -n 1
+              sleep 90
+            done
+          }
+          monitor &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+          bash scripts/nevada-ar9271-module-build.sh 2>&1 | tee "$RUNNER_TEMP/nevada-ar9271-build.log"
+
+      - name: Upload compile-test module audit (NOT INSTALLABLE)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-ar9271-COMPILE-TEST-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/nevada-ar9271-out/ar9271-audit/
+          retention-days: 7
+
+      - name: Upload compile log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-ar9271-compile-log
+          path: ${{ runner.temp }}/nevada-ar9271-build.log
+          if-no-files-found: ignore
+          retention-days: 7
