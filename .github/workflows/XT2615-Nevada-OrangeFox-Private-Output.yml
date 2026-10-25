@@ -291,6 +291,28 @@ jobs:
           grep -Fq 'BOARD_BOOT_HEADER_VERSION := 4' "$board"
           echo "OrangeFox vendor_boot recovery configuration verified."
 
+      - name: Disable deprecated Nevada lunch-menu hooks (temporary build tree only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AndroidProducts.mk already supplies these lunch variants.
+          # The pinned vendorsetup.sh consists only of legacy calls.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("fox/device/motorola/nevada/vendorsetup.sh")
+          lines=[x.strip() for x in p.read_text().splitlines() if x.strip() and not x.strip().startswith("#")]
+          expected=["add_lunch_combo twrp_nevada-user",
+                    "add_lunch_combo twrp_nevada-userdebug",
+                    "add_lunch_combo twrp_nevada-eng"]
+          if lines != expected:
+              raise SystemExit(f"Unexpected vendorsetup.sh; refusing edit: {lines}")
+          products=Path("fox/device/motorola/nevada/AndroidProducts.mk").read_text()
+          for choice in ("COMMON_LUNCH_CHOICES", "twrp_nevada-eng"):
+              if choice not in products: raise SystemExit(f"Missing AndroidProducts entry: {choice}")
+          p.rename(p.with_name("vendorsetup.sh.disabled-only-for-OrangeFox"))
+          print("Disabled obsolete hooks in temporary OrangeFox build tree.")
+          PY
+
       - name: Compile OrangeFox vendor_boot image (serial, guarded)
         shell: bash
         timeout-minutes: 150
@@ -306,7 +328,22 @@ jobs:
             exit 86
           fi
           # Source and lunch run in the subshell so mka is available.
-          setsid bash -c 'set -eo pipefail; export FOX_BUILD_DEVICE=nevada FOX_AB_DEVICE=1 FOX_VENDOR_BOOT_RECOVERY=1 OF_DISABLE_MIUI_SPECIFIC_FEATURES=1 OF_FORCE_PREBUILT_KERNEL=1 FOX_DISABLE_UPDATEZIP=1; source build/envsetup.sh; lunch twrp_nevada-eng; mka vendorbootimage -j1' > "$log" 2>&1 &
+          setsid bash -c '\
+            set -uo pipefail; \
+            export FOX_BUILD_DEVICE=nevada FOX_AB_DEVICE=1 FOX_VENDOR_BOOT_RECOVERY=1 OF_DISABLE_MIUI_SPECIFIC_FEATURES=1 OF_FORCE_PREBUILT_KERNEL=1 FOX_DISABLE_UPDATEZIP=1; \
+            echo "Beginning OrangeFox envsetup"; \
+            source build/envsetup.sh; envsetup_rc=$?; \
+            echo "OrangeFox envsetup returned: $envsetup_rc"; \
+            declare -F lunch >/dev/null || { echo "FATAL: lunch() unavailable"; exit 20; }; \
+            declare -F mka >/dev/null || { echo "FATAL: mka() unavailable"; exit 21; }; \
+            echo "Selecting device: twrp_nevada-eng"; \
+            lunch twrp_nevada-eng; lunch_rc=$?; \
+            echo "OrangeFox lunch returned: $lunch_rc"; \
+            if (( lunch_rc != 0 )); then exit "$lunch_rc"; fi; \
+            set -eo pipefail; \
+            echo "Starting OrangeFox: adbd vendorbootimage"; \
+            mka adbd vendorbootimage -j1 \
+          ' > "$log" 2>&1 &
           build_pid=$!
           aborted=0
           low_mem_samples=0
