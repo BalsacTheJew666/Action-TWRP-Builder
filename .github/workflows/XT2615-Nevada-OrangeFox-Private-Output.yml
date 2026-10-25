@@ -329,11 +329,13 @@ jobs:
           fi
           # Source and lunch run in the subshell so mka is available.
           setsid bash -c '\
-            set -uo pipefail; \
+            set -o pipefail; \
+            # AOSP envsetup.sh is not nounset-safe: it probes optional TOP and ZSH_VERSION. \
             export FOX_BUILD_DEVICE=nevada FOX_AB_DEVICE=1 FOX_VENDOR_BOOT_RECOVERY=1 OF_DISABLE_MIUI_SPECIFIC_FEATURES=1 OF_FORCE_PREBUILT_KERNEL=1 FOX_DISABLE_UPDATEZIP=1; \
             echo "Beginning OrangeFox envsetup"; \
             source build/envsetup.sh; envsetup_rc=$?; \
             echo "OrangeFox envsetup returned: $envsetup_rc"; \
+            if (( envsetup_rc != 0 )); then echo "FATAL: envsetup.sh failed"; exit "$envsetup_rc"; fi; \
             declare -F lunch >/dev/null || { echo "FATAL: lunch() unavailable"; exit 20; }; \
             declare -F mka >/dev/null || { echo "FATAL: mka() unavailable"; exit 21; }; \
             echo "Selecting device: twrp_nevada-eng"; \
