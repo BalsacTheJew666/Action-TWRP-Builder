@@ -28,7 +28,7 @@ jobs:
           set -euo pipefail
           test -n "${GH_TOKEN:-}"
           mkdir -p "$RUNNER_TEMP/fox-private"
-          for RUN_ID in 40161541628 40158832927; do
+          for RUN_ID in 40165383079; do
             work="$RUNNER_TEMP/fox-private/$RUN_ID"
             mkdir -p "$work"
             gh release download "xt2615-orangefox-builder-$RUN_ID" \
