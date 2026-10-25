@@ -4,4 +4,4 @@
 # The workflow only runs automatically on changes to this path.
 # Keep user-specific firmware and all build artifacts in the private repository.
 # Working TWRP backup is deliberately NOT modified.
-run=orangefox-nevada-fix-nounset-03
+run=orangefox-nevada-allow-envsetup-warning-04
