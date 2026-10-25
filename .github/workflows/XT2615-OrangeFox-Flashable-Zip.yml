@@ -1,0 +1,128 @@
+name: XT2615 OrangeFox - Build Flashable ZIP for TWRP
+
+# Repackages an existing VERIFIED OrangeFox vendor_boot.img into an
+# experimental TWRP-compatible flashable ZIP. The shell installer backs up
+# the active slot's current vendor_boot before writing and checks readback.
+# The source image, archive, stock overlay and logs remain PRIVATE.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/orangefox-flashable-build.trigger"
+
+permissions:
+  contents: read
+
+jobs:
+  flashable-installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.NEVADA_PRIVATE_REPO_TOKEN }}
+      PRIVATE_REPO: BalsacTheJew666/Attempt-at-building-recovery-with-actions
+      RELEASE_TAG: xt2615-orangefox-builder-40166106649
+      IMAGE_NAME: XT2615-1-nevada-W1WNS36.18-114-1-OrangeFox-EXPERIMENTAL-vendor_boot.img
+      ZIP_NAME: XT2615-1-nevada-OrangeFox-TWRP-FLASHABLE-EXPERIMENTAL.zip
+      IMAGE_SHA256: 1d43d07a8353e0f7d198b4927d4f1db766c36ab8147eea288bc8b12842de621d
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download and verify original OrangeFox image privately
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}" || {
+            echo "::error::Private release token unavailable."
+            exit 1
+          }
+          umask 077
+          mkdir -p "$RUNNER_TEMP/orangefox-flashable"
+          cd "$RUNNER_TEMP/orangefox-flashable"
+          gh release download "$RELEASE_TAG" \
+            --repo "$PRIVATE_REPO" --pattern "$IMAGE_NAME" --dir .
+          test "$(stat -c '%s' "$IMAGE_NAME")" -eq 67108864
+          printf '%s  %s\n' "$IMAGE_SHA256" "$IMAGE_NAME" | sha256sum --check --status
+          python3 - <<'PY'
+          import os,struct
+          with open(os.environ["IMAGE_NAME"], "rb") as f:
+              header=f.read(16)
+          assert header[:8]==b"VNDRBOOT", "Image magic not VNDRBOOT"
+          ver,pagesize=struct.unpack_from("<II",header,8)
+          assert (ver,pagesize)==(4,4096), f"Unexpected vendor_boot version/page size: {ver}/{pagesize}"
+          print("Original OrangeFox vendor_boot image, capacity and SHA-256 match the verified build.")
+          PY
+
+      - name: Validate installer script and package flashable ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_installer="tools/nevada/orangefox/flashable-update-binary.sh"
+          test -f "$source_installer"
+          bash -n "$source_installer"
+          test "$(head -n 1 "$source_installer")" = "#!/sbin/sh"
+          grep -Fq 'BACKUP_DIR="/sdcard/OrangeFox-BACKUP-XT2615-1"' "$source_installer"
+          grep -Fq 'TARGET_BYTES="$(device_size "$TARGET" || true)"' "$source_installer"
+          grep -Fq 'VERIFY_SHA="$(hash_file "$TARGET" || true)"' "$source_installer"
+          grep -Fq 'SLOT="$(getprop_safe ro.boot.slot_suffix)"' "$source_installer"
+          grep -Fq 'unzip_payload "$ZIPFILE" "$PAYLOAD" > "$IMAGE"' "$source_installer"
+          grep -Fq 'dd if="$IMAGE" of="$TARGET" bs=1048576 count=64' "$source_installer"
+          python3 - "$source_installer" <<'PY'
+          import sys,os,pathlib,zipfile,hashlib
+          installer=pathlib.Path(sys.argv[1]).read_bytes()
+          original=pathlib.Path(os.environ["RUNNER_TEMP"])/"orangefox-flashable"/os.environ["IMAGE_NAME"]
+          dest=original.parent/os.environ["ZIP_NAME"]
+          sha=os.environ["IMAGE_SHA256"]
+          assert hashlib.sha256(original.read_bytes()).hexdigest()==sha
+          readme=(
+            "UNOFFICIAL, EXPERIMENTAL TWRP-FLASHABLE OrangeFox recovery installer\n"
+            "Motorola XT2615-1 / nevada / Android 16 / firmware W1WNS36.18-114-1\n"
+            "Contains whole-slot vendor_boot replacement, NOT the OrangeFox official ramdisk-only installer.\n"
+            "Only flashes ACTIVE SLOT after checking device, exact image hash, partition size, and\n"
+            "persistently backing up the current working vendor_boot.img to internal storage.\n"
+            "If safety checks fail, the installer refuses to flash.\n"
+            "The OrangeFox image has NOT yet been boot-tested on this device. Bootloop risk exists.\n"
+            "Have a second device/PC and a known-good stock/TWRP image available to restore.\n"
+            "Do not flash after updating firmware; this image is built for W1WNS36.18-114-1.\n"
+            "Once flashed, reboot directly into recovery to test, without wiping anything.\n"
+            f"Expected OrangeFox image SHA-256: {sha}\n"
+            "Exact image build run: 40166106649\n"
+          )
+          script=b'ui_print("XT2615-1 Nevada experimental OrangeFox installer");\n'
+          with zipfile.ZipFile(dest,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9,allowZip64=True) as z:
+              def add_bytes(name,data,executable=False):
+                  info=zipfile.ZipInfo(name)
+                  info.create_system=3
+                  info.external_attr=((0o100755 if executable else 0o100644)<<16)
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  z.writestr(info,data,compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+              add_bytes("META-INF/com/google/android/update-binary",installer,True)
+              add_bytes("META-INF/com/google/android/updater-script",script)
+              add_bytes("README-READ-BEFORE-FLASHING.txt",readme.encode())
+              z.write(original,"payload/vendor_boot.img",compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+              add_bytes("SHA256SUMS.txt",(sha+"  payload/vendor_boot.img\n").encode())
+          with zipfile.ZipFile(dest) as z:
+              assert z.testzip() is None, "Zip CRC mismatch"
+              info=z.getinfo("META-INF/com/google/android/update-binary")
+              assert (info.external_attr>>16)&0o111, "update-binary not executable"
+              assert z.read(info.filename).startswith(b"#!/sbin/sh\n")
+              assert z.getinfo("payload/vendor_boot.img").file_size==67108864
+              h=hashlib.sha256()
+              with z.open("payload/vendor_boot.img") as src:
+                  for block in iter(lambda:src.read(1024*1024),b""):
+                      h.update(block)
+              assert h.hexdigest()==sha, "ZIP payload image hash differs from working build"
+              assert b"current active slot" in z.read(info.filename).lower()
+          print(f"TWRP-flashable ZIP created: {dest.name} ({dest.stat().st_size} bytes)")
+          print("Installer executable bit, archive CRC and 64 MiB payload SHA-256 validated.")
+          PY
+
+      - name: Upload flashable ZIP to SAME private OrangeFox release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/orangefox-flashable"
+          gh release upload "$RELEASE_TAG" "$ZIP_NAME" --repo "$PRIVATE_REPO"
+          echo "Experimental TWRP-flashable ZIP uploaded to private OrangeFox release; source images untouched."
