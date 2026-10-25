@@ -1,0 +1,93 @@
+name: XT2615 OrangeFox - ZIP Existing Private Recovery Image
+
+# Download the already-built OrangeFox recovery image privately, compress
+# without changing any bytes in the image, and attach a ZIP to the SAME
+# private draft release. Never publish artifacts on this public repository.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/orangefox-compressed-archive.trigger"
+
+permissions:
+  contents: read
+
+jobs:
+  compress-private-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.NEVADA_PRIVATE_REPO_TOKEN }}
+      PRIVATE_REPO: BalsacTheJew666/Attempt-at-building-recovery-with-actions
+      RELEASE_TAG: xt2615-orangefox-builder-40166106649
+      IMAGE_FILE: XT2615-1-nevada-W1WNS36.18-114-1-OrangeFox-EXPERIMENTAL-vendor_boot.img
+      ARCHIVE_FILE: XT2615-1-nevada-W1WNS36.18-114-1-OrangeFox-EXPERIMENTAL-vendor_boot.zip
+      IMAGE_SHA256: 1d43d07a8353e0f7d198b4927d4f1db766c36ab8147eea288bc8b12842de621d
+    steps:
+      - name: Verify private release access and safely download original image
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Private repository token is unavailable."
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/xt2615-fox-zip"
+          cd "$RUNNER_TEMP/xt2615-fox-zip"
+          gh release download "$RELEASE_TAG" \
+            --repo "$PRIVATE_REPO" --pattern "$IMAGE_FILE" --dir . >/dev/null
+          test -f "$IMAGE_FILE"
+          test "$(stat -c%s "$IMAGE_FILE")" -eq 67108864
+          printf '%s  %s\n' "$IMAGE_SHA256" "$IMAGE_FILE" | sha256sum --check --status
+          echo "Original 64 MiB vendor_boot image verified against expected SHA-256."
+
+      - name: Create compressed standard ZIP and verify image bytes inside
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/xt2615-fox-zip"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os, zipfile
+          image=Path(os.environ["IMAGE_FILE"])
+          archive=Path(os.environ["ARCHIVE_FILE"])
+          expected=os.environ["IMAGE_SHA256"]
+          readme=Path("README.txt")
+          readme.write_text(
+            "OrangeFox Recovery for Motorola Moto G Play 2026 / XT2615-1 (nevada)\\n"
+            "Firmware: W1WNS36.18-114-1; Android 16\\n"
+            "GitHub Actions build: 40166106649\\n\\n"
+            "This ZIP is a COMPRESSED ARCHIVE, NOT a TWRP/OrangeFox flashable ZIP.\\n"
+            "Extract the vendor_boot.img file before any compatible installation procedure.\\n"
+            "The image compiled and passed structural checks but has not been tested on the phone.\\n"
+            "Keep a verified copy of your WORKING TWRP and stock vendor_boot.img.\\n"
+            "Do NOT use Install ZIP in recovery with this archive.\\n"
+          )
+          Path("SHA256SUMS.txt").write_text(f"{expected}  {image.name}\\n")
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED,
+                               compresslevel=9, allowZip64=True) as z:
+              z.write(image, image.name)
+              z.write(readme, readme.name)
+              z.write("SHA256SUMS.txt", "SHA256SUMS.txt")
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None, "ZIP CRC/integrity check failed"
+              assert z.namelist() == [image.name, "README.txt", "SHA256SUMS.txt"]
+              sha=hashlib.sha256()
+              with z.open(image.name) as src:
+                  for chunk in iter(lambda:src.read(1048576),b""):
+                      sha.update(chunk)
+              if sha.hexdigest()!=expected:
+                  raise SystemExit("ZIP embedded image has an unexpected SHA-256")
+          print(f"Compressed ZIP built and verified ({archive.stat().st_size} bytes)")
+          print("Embedded recovery image SHA-256 exactly matches original private release.")
+          PY
+
+      - name: Attach compressed ZIP to existing PRIVATE draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/xt2615-fox-zip"
+          gh release upload "$RELEASE_TAG" "$ARCHIVE_FILE" --repo "$PRIVATE_REPO"
+          echo "Compressed archive added to PRIVATE release (original image untouched)."
