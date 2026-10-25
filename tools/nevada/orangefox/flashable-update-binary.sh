@@ -81,7 +81,7 @@ for PROPERTY in ro.build.fingerprint ro.vendor.build.fingerprint ro.system.build
   case "$VALUE" in
     *W1WNS36.18-114-* )
       case "$VALUE" in
-        *W1WNS36.18-114-1*) : ;;
+        *W1WNS36.18-114-1/*|*W1WNS36.18-114-1:*) : ;;
         *) die "Firmware mismatch in $PROPERTY; requires W1WNS36.18-114-1." ;;
       esac
       ;;
@@ -154,7 +154,7 @@ if ! dd if="$IMAGE" of="$TARGET" bs=1048576 count=64 2>/dev/null; then
   die "Write failed. Check backup and vendor_boot before rebooting."
 fi
 sync
-VERIFY_SHA="$(dd if="$TARGET" bs=1048576 count=64 2>/dev/null | sha256sum | awk '{print $1}')"
+VERIFY_SHA="$(hash_file "$TARGET" || true)"
 if [ "$VERIFY_SHA" != "$EXPECTED" ]; then
   ui_print "Written-image checksum mismatch. Restoring working TWRP..."
   dd if="$BACKUP" of="$TARGET" bs=1048576 count=64 2>/dev/null || true
