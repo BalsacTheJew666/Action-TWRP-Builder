@@ -1,0 +1,87 @@
+name: XT2615-1 Nevada - GKI vs Motorola mac80211 CRC
+
+# Source-only experiment, never packages or installs drivers or flash images.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-GKI-mac80211-CRC.yml'
+      - 'scripts/nevada-gki-vs-moto-mac80211-crc.sh'
+      - 'NEVADA-GKI-MAC80211-CRC.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-gki-crc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compare-gki-motorola-mac80211:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 85
+    env:
+      MOTO_BRANCH: android-16-release-w1wn36.18-114
+      MOTO_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+      GKI_BRANCH: android13-5.15-2025-05
+      GKI_SHA: 5ee07dba9703de3e2c823100eba29f34df13cdc2
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout ABI analysis script
+        uses: actions/checkout@v4
+
+      - name: Install clang and arm64 kernel prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4 binutils
+          clang --version | head -1
+
+      - name: Fetch and verify pinned public source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --single-branch --filter=blob:none \
+            --branch "$MOTO_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/motorola"
+          test "$(git -C "$RUNNER_TEMP/motorola" rev-parse HEAD)" = "$MOTO_SHA"
+          git clone -q --depth 1 --single-branch --filter=blob:none \
+            --branch "$GKI_BRANCH" \
+            https://github.com/aosp-mirror/kernel_common.git \
+            "$RUNNER_TEMP/gki"
+          test "$(git -C "$RUNNER_TEMP/gki" rev-parse HEAD)" = "$GKI_SHA"
+
+      - name: Compare exported ieee80211_alloc_hw_nm CRCs only
+        shell: bash
+        timeout-minutes: 65
+        env:
+          MOTO_SRC: ${{ runner.temp }}/motorola
+          GKI_SRC: ${{ runner.temp }}/gki
+          WORK_DIR: ${{ runner.temp }}/mac80211-compare
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-gki-vs-moto-mac80211-crc.sh 2>&1 |
+            tee "$RUNNER_TEMP/nevada-gki-vs-motorola-crc.log"
+
+      - name: Upload CRC and source-type evidence only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-GKI-vs-MOTOROLA-mac80211-CRC-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/mac80211-compare/gki-vs-motorola-mac80211/
+          retention-days: 7
+
+      - name: Upload diagnostic build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-GKI-vs-MOTOROLA-mac80211-logs
+          path: ${{ runner.temp }}/nevada-gki-vs-motorola-crc.log
+          if-no-files-found: ignore
+          retention-days: 7
