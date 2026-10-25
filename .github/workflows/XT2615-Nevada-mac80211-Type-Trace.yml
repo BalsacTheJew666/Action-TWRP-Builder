@@ -1,0 +1,90 @@
+name: XT2615-1 Nevada - mac80211 ABI Type Trace
+
+# Short, source-only KMI diagnostic. Does not package or load phone modules.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-mac80211-Type-Trace.yml'
+      - 'scripts/nevada-ieee80211-symtypes-trace.sh'
+      - 'NEVADA-MAC80211-TYPE-TRACE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-symtypes-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mac80211-source-abi:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      MOTOROLA_BRANCH: android-16-release-w1wn36.18-114
+      MOTOROLA_COMMIT: 0fa176ca7f56c349b51acd83684284c02ced5854
+      STOCK_CONFIG_SHA256: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout diagnostic scripts
+        uses: actions/checkout@v4
+
+      - name: Verify device stock config reference
+        run: |
+          set -euo pipefail
+          printf '%s  ci/xt2615-nevada-stock.config\n' "$STOCK_CONFIG_SHA256" | sha256sum -c -
+
+      - name: Install LLVM and kernel build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4
+          clang --version | head -1
+
+      - name: Fetch pinned public Motorola kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --filter=blob:none \
+            --branch "$MOTOROLA_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/nevada-kernel"
+          actual="$(git -C "$RUNNER_TEMP/nevada-kernel" rev-parse HEAD)"
+          test "$actual" = "$MOTOROLA_COMMIT" || {
+            echo "::error::Motorola source differs from pinned commit"
+            exit 1
+          }
+
+      - name: Trace genksyms ABI types without full kernel compilation
+        timeout-minutes: 45
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/nevada-kernel
+          WORK_DIR: ${{ runner.temp }}/nevada-symtypes-work
+          STOCK_CONFIG: ${{ github.workspace }}/ci/xt2615-nevada-stock.config
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-ieee80211-symtypes-trace.sh 2>&1 |
+            tee "$RUNNER_TEMP/nevada-symtypes-log.txt"
+
+      - name: Upload type expansion evidence (NO MODULES)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-mac80211-GENKSYMS-DIAGNOSTICS-ONLY
+          path: ${{ runner.temp }}/nevada-symtypes-work/abi-types/
+          retention-days: 7
+
+      - name: Upload compile diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-mac80211-GENKSYMS-logs
+          path: ${{ runner.temp }}/nevada-symtypes-log.txt
+          if-no-files-found: ignore
+          retention-days: 7
