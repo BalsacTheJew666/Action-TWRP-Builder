@@ -1,0 +1,50 @@
+name: XT2615 OrangeFox - Private diagnostics extraction
+
+# Read only the already-created private diagnostic release.
+# Export text to a PRIVATE diagnostics branch so it can be inspected through
+# the GitHub connector without publishing private build details.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/orangefox-private-log-pull.trigger"
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PRIVATE_REPO: BalsacTheJew666/Attempt-at-building-recovery-with-actions
+      PRIVATE_BRANCH: diagnostics/orangefox-private-logs
+      GH_TOKEN: ${{ secrets.NEVADA_PRIVATE_REPO_TOKEN }}
+    steps:
+      - name: Extract source errors into private diagnostics branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          mkdir -p "$RUNNER_TEMP/fox-private"
+          for RUN_ID in 40161541628 40158832927; do
+            work="$RUNNER_TEMP/fox-private/$RUN_ID"
+            mkdir -p "$work"
+            gh release download "xt2615-orangefox-builder-$RUN_ID" \
+              --repo "$PRIVATE_REPO" \
+              --pattern "PRIVATE-build-logs.zip" --dir "$work" \
+              >/dev/null
+            unzip -p "$work/PRIVATE-build-logs.zip" orangefox-build.log > "$work/orangefox-build.log"
+            test -s "$work/orangefox-build.log"
+            B64="$(base64 -w 0 "$work/orangefox-build.log")"
+            MSG="Archive private OrangeFox compile diagnostics from $RUN_ID"
+            jq -n --arg branch "$PRIVATE_BRANCH" --arg message "$MSG" \
+              --arg content "$B64" \
+              '{branch:$branch,message:$message,content:$content}' \
+              > "$work/payload.json"
+            gh api --method PUT \
+              "repos/$PRIVATE_REPO/contents/orangefox-builds/run-$RUN_ID/orangefox-build.log" \
+              --input "$work/payload.json" >/dev/null
+            echo "Archived OrangeFox build $RUN_ID diagnostics to PRIVATE branch."
+          done
