@@ -1,0 +1,100 @@
+name: XT2615-1 Nevada - AR9271 LED-free ABI Experiment
+
+# Build the non-installable driver in a PR, and allow manual reruns after merge.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-AR9271-LED-Free.yml'
+      - 'scripts/nevada-ar9271-ledfree-experiment.sh'
+      - 'NEVADA-AR9271-LED-FREE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-ath9k-ledfree-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ledfree-ar9271-abi-audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    env:
+      MOTOROLA_BRANCH: android-16-release-w1wn36.18-114
+      MOTOROLA_COMMIT: 0fa176ca7f56c349b51acd83684284c02ced5854
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout experimental scripts
+        uses: actions/checkout@v4
+
+      - name: Prepare Clang and ARM64 build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift || true
+          sudo apt-get clean
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4
+          clang --version | head -1
+          df -h /
+          free -h
+
+      - name: Fetch exact Motorola kernel revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --filter=blob:none \
+            --branch "$MOTOROLA_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/nevada-kernel"
+          actual="$(git -C "$RUNNER_TEMP/nevada-kernel" rev-parse HEAD)"
+          test "$actual" = "$MOTOROLA_COMMIT" || {
+            echo "::error::Pinned Motorola source changed; refusing to proceed"
+            exit 1
+          }
+
+      - name: Compile LED-free AR9271 modules (never install)
+        shell: bash
+        timeout-minutes: 125
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/nevada-kernel
+          OUT_DIR: ${{ runner.temp }}/nevada-ath9k-ledfree
+        run: |
+          set -euo pipefail
+          monitor() {
+            while :; do
+              echo "=== $(date -u +%FT%TZ) resource check ==="
+              free -m
+              df -h "$RUNNER_TEMP" | tail -1
+              sleep 90
+            done
+          }
+          monitor &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          bash scripts/nevada-ar9271-ledfree-experiment.sh 2>&1 |
+            tee "$RUNNER_TEMP/nevada-ar9271-ledfree.log"
+
+      - name: Upload offline-only module ABI data
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-AR9271-LED-FREE-ABI-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/nevada-ath9k-ledfree/ar9271-ledfree-audit/
+          retention-days: 7
+
+      - name: Upload compilation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-AR9271-LED-FREE-build-log
+          path: ${{ runner.temp }}/nevada-ar9271-ledfree.log
+          if-no-files-found: ignore
+          retention-days: 7
