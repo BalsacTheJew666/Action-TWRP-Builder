@@ -56,16 +56,16 @@ jobs:
           expected=os.environ["IMAGE_SHA256"]
           readme=Path("README.txt")
           readme.write_text(
-            "OrangeFox Recovery for Motorola Moto G Play 2026 / XT2615-1 (nevada)\\n"
-            "Firmware: W1WNS36.18-114-1; Android 16\\n"
-            "GitHub Actions build: 40166106649\\n\\n"
-            "This ZIP is a COMPRESSED ARCHIVE, NOT a TWRP/OrangeFox flashable ZIP.\\n"
-            "Extract the vendor_boot.img file before any compatible installation procedure.\\n"
-            "The image compiled and passed structural checks but has not been tested on the phone.\\n"
-            "Keep a verified copy of your WORKING TWRP and stock vendor_boot.img.\\n"
-            "Do NOT use Install ZIP in recovery with this archive.\\n"
+            "OrangeFox Recovery for Motorola Moto G Play 2026 / XT2615-1 (nevada)\n"
+            "Firmware: W1WNS36.18-114-1; Android 16\n"
+            "GitHub Actions build: 40166106649\n\n"
+            "This ZIP is a COMPRESSED ARCHIVE, NOT a TWRP/OrangeFox flashable ZIP.\n"
+            "Extract the vendor_boot.img file before any compatible installation procedure.\n"
+            "The image compiled and passed structural checks but has not been tested on the phone.\n"
+            "Keep a verified copy of your WORKING TWRP and stock vendor_boot.img.\n"
+            "Do NOT use Install ZIP in recovery with this archive.\n"
           )
-          Path("SHA256SUMS.txt").write_text(f"{expected}  {image.name}\\n")
+          Path("SHA256SUMS.txt").write_text(f"{expected}  {image.name}\n")
           with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED,
                                compresslevel=9, allowZip64=True) as z:
               z.write(image, image.name)
