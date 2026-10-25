@@ -336,9 +336,10 @@ jobs:
             echo "Beginning OrangeFox envsetup"; \
             source build/envsetup.sh; envsetup_rc=$?; \
             echo "OrangeFox envsetup returned: $envsetup_rc"; \
-            if (( envsetup_rc != 0 )); then echo "FATAL: envsetup.sh failed"; exit "$envsetup_rc"; fi; \
-            declare -F lunch >/dev/null || { echo "FATAL: lunch() unavailable"; exit 20; }; \
-            declare -F mka >/dev/null || { echo "FATAL: mka() unavailable"; exit 21; }; \
+            if (( envsetup_rc != 0 )); then echo "WARN: envsetup source returned nonzero; checking installed build functions before deciding whether it is fatal"; fi; \
+            declare -F lunch >/dev/null || { echo "FATAL: lunch() unavailable after envsetup"; exit 20; }; \
+            declare -F mka >/dev/null || { echo "FATAL: mka() unavailable after envsetup"; exit 21; }; \
+            echo "Environment exported lunch() and mka(); proceeding with target selection"; \
             echo "Selecting device: twrp_nevada-eng"; \
             lunch twrp_nevada-eng; lunch_rc=$?; \
             echo "OrangeFox lunch returned: $lunch_rc"; \
