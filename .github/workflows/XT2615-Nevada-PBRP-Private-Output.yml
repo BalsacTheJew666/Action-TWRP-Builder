@@ -1,0 +1,507 @@
+name: XT2615-1 Nevada PBRP - Public 16GB Build, Private Output
+
+# Security: only a manual run from this repository's default branch. No PR,
+# fork, or external dispatch trigger can use the cross-repository PAT.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/pbrp-nevada-build-start-20261025.trigger"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xt2615-nevada-pbrp-public-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Experimental PBRP vendor_boot / 16GB runner / private output
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      PRIVATE_REPO: BalsacTheJew666/Attempt-at-building-recovery-with-actions
+      OVERLAY_FILE: XT2615-1-nevada-W1WNS36.18-114-1-TWRP-build-overlay.zip
+      OVERLAY_SHA256: c21b1cbb5ac2dae13d72d753b326489a2651d113585d106771a81604e63c0b9b
+      NEVADA_TREE_COMMIT: 93b41766c4caf7a5abe6be7d1bc5d19540e7db1c
+      DEBIAN_FRONTEND: noninteractive
+      ALLOW_MISSING_DEPENDENCIES: 'true'
+      CCACHE_DISABLE: '1'
+      NINJA_HIGHMEM_NUM_JOBS: '1'
+      GOMAXPROCS: '2'
+
+    steps:
+      # No actions/checkout, to avoid executing scripts from the existing public
+      # repository. The only public repository inputs are this workflow and
+      # the pinned upstream Nevada device-tree commit.
+      - name: Verify architecture, memory and private output authentication
+        env:
+          NEVADA_PRIVATE_REPO_TOKEN: ${{ secrets.NEVADA_PRIVATE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Runner resources ==="
+          uname -m
+          nproc
+          free -h
+          df -hT / /mnt
+          mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          if (( mem_kb < 14680064 )); then
+            echo "::error::This job requires the 16 GB public GitHub Actions runner."
+            exit 1
+          fi
+          if [[ -z "${NEVADA_PRIVATE_REPO_TOKEN:-}" ]]; then
+            echo "::error::Create the NEVADA_PRIVATE_REPO_TOKEN Actions secret in THIS PUBLIC repository, scoped only to the private repository (Contents: read/write)."
+            exit 1
+          fi
+          # Verify private access BEFORE using hours of build resources.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 40 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $NEVADA_PRIVATE_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$PRIVATE_REPO")
+          if [[ "$status" != 200 ]]; then
+            echo "::error::Private repository access check failed (HTTP $status). Check the token repository scope and expiry."
+            exit 1
+          fi
+          echo "Private repository authorization check passed (contents not exposed)."
+
+      - name: Download and verify matching firmware overlay privately
+        env:
+          NEVADA_PRIVATE_REPO_TOKEN: ${{ secrets.NEVADA_PRIVATE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xt2615-private"
+          dest="$RUNNER_TEMP/xt2615-private/overlay.zip"
+          # A 6.8 MB file requires the GitHub contents API raw media type.
+          curl -fLsS --retry 2 --connect-timeout 20 --max-time 180 \
+            -H "Accept: application/vnd.github.raw+json" \
+            -H "Authorization: Bearer $NEVADA_PRIVATE_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$PRIVATE_REPO/contents/$OVERLAY_FILE?ref=main" \
+            -o "$dest"
+          echo "$OVERLAY_SHA256  $dest" | sha256sum --check --status || {
+            echo "::error::Stock overlay SHA256 mismatch or API did not return binary data."
+            exit 1
+          }
+          python3 - "$dest" <<'PY'
+          import zipfile,sys
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert z.testzip() is None, "Corrupt stock overlay ZIP"
+              modules=[n for n in z.namelist() if n.startswith('overlay/recovery/root/lib/modules/') and n.endswith('.ko')]
+              assert len(modules)==197, f'Expected 197 stock modules, found {len(modules)}'
+              for name in ('apply-overlay.sh','overlay/prebuilt/dtb.img',
+                           'overlay/recovery/root/first_stage_ramdisk/fstab.mt6835'):
+                  assert name in z.namelist(), 'Missing required stock overlay file'
+          print('Verified stock overlay locally; file remains outside the public repository.')
+          PY
+
+      - name: Reclaim runner disk space (no loop-backed LVM)
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -hT / /mnt
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/local/.ghcup || true
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -hT / /mnt
+          avail=$(df -Pk / | awk 'END {print $4}')
+          if (( avail < 20971520 )); then
+            echo "::error::Less than 20 GiB free after cleanup. The public runner's disk is insufficient without further source-size changes."
+            exit 1
+          fi
+
+      - name: Install PBRP dependencies over HTTPS (timeouts enforced)
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ubuntu-xt2615.list" <<'APT_SOURCES'
+          deb [arch=amd64] https://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb [arch=amd64] https://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb [arch=amd64] https://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+          APT_SOURCES
+          apt_opts=(
+            -o "Dir::Etc::sourcelist=$RUNNER_TEMP/ubuntu-xt2615.list"
+            -o "Dir::Etc::sourceparts=-"
+            -o "Acquire::Retries=1"
+            -o "Acquire::https::Timeout=30"
+            -o "Acquire::ForceIPv4=true"
+          )
+          set +e
+          {
+            timeout --signal=TERM --kill-after=30s 10m sudo apt-get "${apt_opts[@]}" update &&
+            timeout --signal=TERM --kill-after=30s 15m sudo env DEBIAN_FRONTEND=noninteractive \
+              apt-get "${apt_opts[@]}" install -y --no-install-recommends \
+                bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+                git git-lfs gnupg gperf imagemagick lib32ncurses5-dev \
+                lib32readline-dev lib32z1-dev libelf-dev liblz4-tool \
+                libncurses5-dev libsdl1.2-dev libssl-dev libxml2-utils \
+                lzop pngcrush python3 python-is-python3 openjdk-11-jdk \
+                rsync schedtool squashfs-tools unzip xsltproc zip zlib1g-dev
+          } > "$RUNNER_TEMP/xt2615-private/dependency-install.log" 2>&1
+          rc=$?
+          set -e
+          if (( rc != 0 )); then
+            echo "::error::Package installation failed (exit $rc). Diagnostics will be saved to the PRIVATE release."
+            exit "$rc"
+          fi
+          mkdir -p "$HOME/bin"
+          curl -fLsS --connect-timeout 15 --max-time 90 \
+            https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod 755 "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* || true
+          df -h /
+          echo "Dependency installation completed."
+
+      - name: Sync PBRP android-12.1 source
+        shell: bash
+        timeout-minutes: 175
+        run: |
+          set -euo pipefail
+          export TMPDIR=/tmp/xt2615
+          mkdir -p "$TMPDIR" pbrp
+          cd pbrp
+          "$HOME/bin/repo" init --depth=1 \
+            -u https://github.com/PitchBlackRecoveryProject/manifest_pb.git \
+            -b android-12.1 > "$RUNNER_TEMP/xt2615-private/repo-sync.log" 2>&1 || {
+              echo "::error::PBRP repo init failed; details in private logs."
+              exit 1
+            }
+          setsid bash -c 'set -eo pipefail; cd "$GITHUB_WORKSPACE/pbrp"; "$HOME/bin/repo" sync -c -j2 --fail-fast --no-tags --no-clone-bundle' \
+            >> "$RUNNER_TEMP/xt2615-private/repo-sync.log" 2>&1 &
+          sync_pid=$!
+          aborted=0
+          while kill -0 "$sync_pid" 2>/dev/null; do
+            free_kb=$(df -Pk / | awk 'END {print $4}')
+            mem_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+            echo "PBRP sync: disk free $((free_kb/1024)) MiB; RAM available $((mem_kb/1024)) MiB"
+            if (( free_kb < 8388608 )); then
+              echo "::error::Source sync stopped at fewer than 8 GiB free."
+              kill -TERM -- "-$sync_pid" 2>/dev/null || true
+              aborted=1
+              break
+            fi
+            sleep 40
+          done
+          set +e
+          wait "$sync_pid"
+          rc=$?
+          set -e
+          if (( aborted )); then exit 86; fi
+          if (( rc != 0 )); then
+            echo "::error::PBRP repo sync failed (exit $rc), private log saved."
+            exit "$rc"
+          fi
+          test -f "$GITHUB_WORKSPACE/pbrp/build/envsetup.sh"
+          test -d "$GITHUB_WORKSPACE/pbrp/bootable/recovery"
+          test -f "$GITHUB_WORKSPACE/pbrp/vendor/pb/config/common.mk" || {
+            echo "::error::Official PBRP vendor/pb missing: do not build plain TWRP."
+            exit 1
+          }
+          {
+            echo "manifest=$(git -C "$GITHUB_WORKSPACE/pbrp/.repo/manifests" rev-parse HEAD)"
+            echo "recovery=$(git -C "$GITHUB_WORKSPACE/pbrp/bootable/recovery" rev-parse HEAD)"
+            echo "vendor_pb=$(git -C "$GITHUB_WORKSPACE/pbrp/vendor/pb" rev-parse HEAD)"
+          } > "$RUNNER_TEMP/xt2615-private/pbrp-source-revisions.txt"
+          df -h /
+
+      - name: Checkout pinned Nevada device tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pbrp/device/motorola/nevada
+          cd pbrp/device/motorola/nevada
+          git init -q
+          git remote add origin https://github.com/crabcakes97/moto_G_Play_2026_TWRP.git
+          git fetch -q --depth=1 origin "$NEVADA_TREE_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$NEVADA_TREE_COMMIT"
+          echo "Verified pinned Nevada source commit."
+
+      - name: Apply private stock firmware overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$GITHUB_WORKSPACE/pbrp/device/motorola/nevada"
+          mkdir -p "$RUNNER_TEMP/xt2615-private/unpacked"
+          unzip -qo "$RUNNER_TEMP/xt2615-private/overlay.zip" \
+            -d "$RUNNER_TEMP/xt2615-private/unpacked"
+          bash "$RUNNER_TEMP/xt2615-private/unpacked/apply-overlay.sh" "$dest" \
+            > "$RUNNER_TEMP/xt2615-private/overlay-apply.log" 2>&1
+          old="$dest/recovery/root/lib/modules.before-XT2615-overlay"
+          if [ -d "$old" ]; then
+            mv "$old" "$RUNNER_TEMP/xt2615-private/old-modules"
+          fi
+          test -f "$dest/XT2615-STOCK-OVERLAY-APPLIED.txt"
+          grep -Fq 'PLATFORM_SECURITY_PATCH := 2026-04-01' "$dest/BoardConfig.mk"
+          echo "Firmware-matched 5.15.180 overlay applied successfully."
+          df -h /
+
+      - name: Quote multiword vendor kernel cmdline for mkbootimg
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The pinned Nevada tree expands BOARD_VENDOR_CMDLINE unquoted.
+          # With the stock W1WNS36.18-114-1 overlay, the three extra kernel
+          # parameters become unexpected positional arguments to mkbootimg.
+          # Quote only the Makefile argument expansion; retain every kernel
+          # parameter exactly as supplied by the firmware-matched overlay.
+          python3 - <<'PY'
+          from pathlib import Path
+          import shlex
+          p=Path("pbrp/device/motorola/nevada/BoardConfig.mk")
+          src=p.read_text()
+          before='BOARD_MKBOOTIMG_ARGS += --vendor_cmdline $(BOARD_VENDOR_CMDLINE)'
+          after='BOARD_MKBOOTIMG_ARGS += --vendor_cmdline "$(BOARD_VENDOR_CMDLINE)"'
+          count=src.count(before)
+          if count != 1:
+              raise SystemExit(f"Unsafe vendor_cmdline patch: expected exactly one unquoted line, found {count}")
+          cmdlines=[line for line in src.splitlines()
+                    if line.strip().startswith("BOARD_VENDOR_CMDLINE")]
+          if not cmdlines:
+              raise SystemExit("No BOARD_VENDOR_CMDLINE setting in BoardConfig")
+          for parameter in ("bootopt=64S3,32N2,64N2", "mem.enable_mglru=1",
+                            "loglevel=4", "initcall_debug=0"):
+              if not any(parameter in line for line in cmdlines):
+                  raise SystemExit(f"Missing expected firmware vendor_cmdline parameter: {parameter}")
+          p.write_text(src.replace(before,after,1))
+          example="bootopt=64S3,32N2,64N2 mem.enable_mglru=1 loglevel=4 initcall_debug=0"
+          args=shlex.split('--vendor_cmdline "'+example+'" --pagesize 4096')
+          assert args==['--vendor_cmdline',example,'--pagesize','4096']
+          print("Fixed mkbootimg vendor_cmdline quoting without changing its parameter values.")
+          PY
+
+      - name: Generate PBRP Nevada product (cloud workspace only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          base=Path("pbrp/device/motorola/nevada")
+          products=base/"AndroidProducts.mk"
+          content=products.read_text()
+          if "twrp_nevada.mk" not in content or "COMMON_LUNCH_CHOICES" not in content:
+              raise SystemExit("Unexpected Nevada device product configuration")
+          if "pb_nevada.mk" in content:
+              raise SystemExit("PBRP product already exists; refusing blind overwrite")
+          twrp=(base/"twrp_nevada.mk").read_text()
+          if "vendor/twrp/config/common.mk" not in twrp or "PRODUCT_NAME := twrp_nevada" not in twrp:
+              raise SystemExit("Pinned TWRP product changed; refusing transformation")
+          pb=twrp.replace("vendor/twrp/config/common.mk","vendor/pb/config/common.mk")
+          pb=pb.replace("PRODUCT_NAME := twrp_nevada","PRODUCT_NAME := pb_nevada")
+          pb += "\n# Unofficial XT2615-1 Nevada PBRP port.\n"
+          (base/"pb_nevada.mk").write_text(pb)
+          lines=content.splitlines(keepends=True)
+          result=[]
+          for line in lines:
+              result.append(line)
+              if line.startswith("PRODUCT_MAKEFILES :="):
+                  result.append("    $(LOCAL_DIR)/pb_nevada.mk " + chr(92) + "\n")
+              elif line.startswith("COMMON_LUNCH_CHOICES :="):
+                  result.append("    pb_nevada-eng " + chr(92) + "\n")
+          products.write_text("".join(result))
+          assert "pb_nevada-eng" in products.read_text()
+          assert "$(LOCAL_DIR)/pb_nevada.mk" in products.read_text()
+          print("Created pb_nevada-eng without changing any real repository or known-good recovery.")
+          PY
+
+      - name: Validate PBRP vendor_boot configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          tree="$GITHUB_WORKSPACE/pbrp/device/motorola/nevada"
+          test -f "$GITHUB_WORKSPACE/pbrp/vendor/pb/config/common.mk"
+          grep -Fq 'vendor/pb/config/common.mk' "$tree/pb_nevada.mk"
+          grep -Fq 'PRODUCT_NAME := pb_nevada' "$tree/pb_nevada.mk"
+          grep -Fq 'BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT := true' "$tree/BoardConfig.mk"
+          grep -Fq 'BOARD_BOOT_HEADER_VERSION := 4' "$tree/BoardConfig.mk"
+          echo "Official PBRP product and Nevada vendor_boot v4 configuration verified."
+
+      - name: Disable deprecated Nevada lunch-menu hooks (temporary build tree only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AndroidProducts.mk already supplies these lunch variants.
+          # The pinned vendorsetup.sh consists only of legacy calls.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("pbrp/device/motorola/nevada/vendorsetup.sh")
+          lines=[x.strip() for x in p.read_text().splitlines() if x.strip() and not x.strip().startswith("#")]
+          expected=["add_lunch_combo twrp_nevada-user",
+                    "add_lunch_combo twrp_nevada-userdebug",
+                    "add_lunch_combo twrp_nevada-eng"]
+          if lines != expected:
+              raise SystemExit(f"Unexpected vendorsetup.sh; refusing edit: {lines}")
+          products=Path("pbrp/device/motorola/nevada/AndroidProducts.mk").read_text()
+          for choice in ("COMMON_LUNCH_CHOICES", "twrp_nevada-eng"):
+              if choice not in products: raise SystemExit(f"Missing AndroidProducts entry: {choice}")
+          p.rename(p.with_name("vendorsetup.sh.disabled-only-for-PBRP"))
+          print("Disabled obsolete hooks in temporary PBRP build tree.")
+          PY
+
+      - name: Compile PBRP vendor_boot image (serial, guarded)
+        shell: bash
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          export TMPDIR=/tmp/xt2615
+          mkdir -p "$TMPDIR"
+          log="$RUNNER_TEMP/xt2615-private/pbrp-build.log"
+          cd pbrp
+          free_before=$(df -Pk / | awk 'END {print $4}')
+          if (( free_before < 6291456 )); then
+            echo "::error::Less than 6 GiB before Soong bootstrap; avoid runner crash."
+            exit 86
+          fi
+          # Source and lunch run in the subshell so mka is available.
+          # Do NOT use bash nounset (-u) while sourcing Android/PBRP envsetup.
+          # It legitimately probes optional TOP and ZSH_VERSION environment variables.
+          setsid bash -c '\
+            set -o pipefail; \
+            export PB_DEVICE=nevada; \
+            echo "Beginning PBRP envsetup"; \
+            source build/envsetup.sh; envsetup_rc=$?; \
+            echo "PBRP envsetup returned: $envsetup_rc"; \
+            if (( envsetup_rc != 0 )); then echo "WARN: envsetup source returned nonzero; checking installed build functions before deciding whether it is fatal"; fi; \
+            declare -F lunch >/dev/null || { echo "FATAL: lunch() unavailable after envsetup"; exit 20; }; \
+            declare -F mka >/dev/null || { echo "FATAL: mka() unavailable after envsetup"; exit 21; }; \
+            echo "Environment exported lunch() and mka(); proceeding with target selection"; \
+            echo "Selecting device: pb_nevada-eng"; \
+            lunch pb_nevada-eng; lunch_rc=$?; \
+            echo "PBRP lunch returned: $lunch_rc"; \
+            if (( lunch_rc != 0 )); then exit "$lunch_rc"; fi; \
+            set -eo pipefail; \
+            echo "Starting PBRP: adbd vendorbootimage"; \
+            mka adbd vendorbootimage -j1 \
+          ' > "$log" 2>&1 &
+          build_pid=$!
+          aborted=0
+          low_mem_samples=0
+          while kill -0 "$build_pid" 2>/dev/null; do
+            disk_kb=$(df -Pk / | awk 'END {print $4}')
+            mem_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+            swap_kb=$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)
+            echo "Compiling: disk free $((disk_kb/1024)) MiB, RAM available $((mem_kb/1024)) MiB, swap free $((swap_kb/1024)) MiB"
+            if (( mem_kb < 524288 )); then
+              low_mem_samples=$((low_mem_samples+1))
+            else
+              low_mem_samples=0
+            fi
+            if (( disk_kb < 3145728 || low_mem_samples >= 3 )); then
+              echo "::error::Resource guard stopped compilation. Detailed logs remain private."
+              kill -TERM -- "-$build_pid" 2>/dev/null || true
+              aborted=1
+              break
+            fi
+            sleep 25
+          done
+          set +e
+          wait "$build_pid"
+          rc=$?
+          set -e
+          if (( aborted )); then exit 86; fi
+          if (( rc != 0 )); then
+            echo "::error::PBRP compilation failed (exit $rc). See logs in PRIVATE release."
+            exit "$rc"
+          fi
+          echo "Build command completed; image still requires validation."
+
+      - name: Validate experimental vendor_boot header and size
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xt2615-private/output"
+          python3 - <<'PY'
+          import pathlib, hashlib, struct, shutil, os
+          base=pathlib.Path(os.environ['RUNNER_TEMP'])/'xt2615-private'/'output'
+          p=pathlib.Path('pbrp/out/target/product/nevada/vendor_boot.img')
+          if not p.is_file(): raise SystemExit('vendor_boot.img missing')
+          size=p.stat().st_size
+          if not 0 < size <= 67108864: raise SystemExit(f'Unexpected image size: {size}')
+          with p.open('rb') as f: h=f.read(32)
+          if h[:8]!=b'VNDRBOOT': raise SystemExit('Invalid vendor boot magic')
+          version, page_size=struct.unpack_from('<II',h,8)
+          if (version,page_size)!=(4,4096):
+              raise SystemExit(f'Unexpected vendor header: {version}/{page_size}')
+          name='XT2615-1-nevada-W1WNS36.18-114-1-PBRP-EXPERIMENTAL-vendor_boot.img'
+          dest=base/name
+          shutil.copyfile(p,dest)
+          sha=hashlib.sha256()
+          with dest.open('rb') as src:
+              for chunk in iter(lambda:src.read(1024*1024),b''): sha.update(chunk)
+          (base/'BUILD-INFO.txt').write_text(
+              'EXPERIMENTAL - NOT BOOT TESTED - DO NOT FLASH WITHOUT VALIDATION\n'
+              'Phone: Motorola XT2615-1 nevada, Boost, Android 16\n'
+              'Firmware: W1WNS36.18-114-1; security patch 2026-04-01\n'
+              'Kernel build: 5.15.180-android13-8-00018-g9b2308ac0ad6-ab14563692\n'
+              'Public run ID: '+os.environ['GITHUB_RUN_ID']+'\n'
+              f'Size: {size} bytes\nHeader: version {version}, page {page_size}\n'
+              f'SHA-256: {sha.hexdigest()}\n')
+          print('Experimental PBRP vendor_boot header verified. Not device tested.')
+          PY
+
+      # NEVER use actions/upload-artifact in this public repository.
+      # Anyone with read access to a public repo could retrieve those files.
+      - name: Deliver image and diagnostic logs ONLY to private repository
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.NEVADA_PRIVATE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::warning::Missing NEVADA_PRIVATE_REPO_TOKEN: cannot deliver private output."
+            exit 1
+          fi
+          root="$RUNNER_TEMP/xt2615-private"
+          mkdir -p "$root/output"
+          # Bundle logs exclusively on the ephemeral runner, never public artifact storage.
+          python3 - "$root" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1])
+          wanted=['dependency-install.log','repo-sync.log','overlay-apply.log','pbrp-build.log','pbrp-source-revisions.txt']
+          with zipfile.ZipFile(root/'output'/'PRIVATE-build-logs.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for name in wanted:
+                  p=root/name
+                  if p.is_file(): z.write(p,arcname=name)
+          PY
+          tag="xt2615-pbrp-builder-${GITHUB_RUN_ID}"
+          notes="$root/output/RELEASE-NOTES.txt"
+          cat > "$notes" <<EOF
+          Experimental XT2615-1 Nevada PBRP experimental build from public runner.
+          Public run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          Private overlay SHA-256 verified before use.
+          Never flash untested images.
+          EOF
+          assets=("$root/output/PRIVATE-build-logs.zip")
+          shopt -s nullglob
+          images=("$root/output/"*.img)
+          if (( ${#images[@]} )); then
+            assets+=("${images[@]}")
+          fi
+          if [ -f "$root/output/BUILD-INFO.txt" ]; then
+            assets+=("$root/output/BUILD-INFO.txt")
+          fi
+          # A DRAFT release in the PRIVATE repository prevents its assets
+          # from becoming available as public workflow artifacts.
+          gh release create "$tag" -R "$PRIVATE_REPO" \
+            --target main --draft \
+            --title "XT2615-1 PBRP EXPERIMENTAL $GITHUB_RUN_ID" \
+            --notes-file "$notes" "${assets[@]}" \
+            > "$root/private-release-location.txt"
+          echo "Private draft release created successfully."
+          echo "Open the Releases section of the PRIVATE TWRP repository to download the output."
