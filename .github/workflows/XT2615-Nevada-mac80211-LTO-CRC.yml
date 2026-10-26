@@ -1,0 +1,86 @@
+name: XT2615-1 Nevada - mac80211 LTO CRC Matrix
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-mac80211-LTO-CRC.yml'
+      - 'scripts/nevada-mac80211-lto-crc-matrix.sh'
+      - 'NEVADA-MAC80211-LTO-CRC.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-mac80211-lto-crc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compare-lto-crcs:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      MOTO_BRANCH: android-16-release-w1wn36.18-114
+      MOTO_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+      STOCK_CONFIG_SHA256: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout ABI probe
+        uses: actions/checkout@v4
+
+      - name: Verify stock kernel configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$STOCK_CONFIG_SHA256  ci/xt2615-nevada-stock.config" | sha256sum -c -
+
+      - name: Install compiler and kernel utilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4 file
+          clang --version | head -1
+
+      - name: Fetch pinned Motorola public source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --filter=blob:none --single-branch \
+            --branch "$MOTO_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/moto-src"
+          test "$(git -C "$RUNNER_TEMP/moto-src" rev-parse HEAD)" = "$MOTO_SHA"
+
+      - name: Compile only three mac80211 ABI objects
+        shell: bash
+        timeout-minutes: 45
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/moto-src
+          OUT_ROOT: ${{ runner.temp }}/nevada-lto-crc
+          STOCK_CONFIG: ${{ github.workspace }}/ci/xt2615-nevada-stock.config
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-mac80211-lto-crc-matrix.sh 2>&1 |
+            tee "$RUNNER_TEMP/nevada-lto-crc-matrix.log"
+
+      - name: Publish ABI evidence ONLY - no flashables
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-LTO-CRC-MATRIX-DIAGNOSTIC-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/nevada-lto-crc/evidence/
+          retention-days: 7
+
+      - name: Publish diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-LTO-CRC-MATRIX-logs
+          path: ${{ runner.temp }}/nevada-lto-crc-matrix.log
+          if-no-files-found: ignore
+          retention-days: 7
