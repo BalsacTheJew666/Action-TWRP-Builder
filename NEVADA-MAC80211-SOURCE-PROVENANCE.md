@@ -35,3 +35,14 @@ Gitiles' ability to resolve abbreviated Git IDs or allow fetch-by-hash is uncert
 - If Google resolves the SHA, that identifies a **source candidate** for the independently built Wi-Fi module; it does not by itself reproduce the original compiler, config, symbol whitelist, or ABI.
 - Even a matching single symbol CRC does not prove all imports, CFI, signatures, firmware, USB enumeration, or NetHunter functionality are compatible.
 - Never forge symbol CRCs, modify `vermagic`, replace stock `cfg80211` or `mac80211`, or risk current KernelSU, TWRP and internal Wi-Fi.
+
+## Verified source-lookup controls — run #40278010593
+
+The follow-up workflow **completed successfully**. Its Google Gitiles requests showed:
+- **Known full GKI SHA** `9b2308ac0ad616788fb57ba688aa07f0ff221355`: HTTP **200**, parsed SHA validated.
+- **Same known short SHA** `9b2308ac0ad6`: HTTP **200**, parsed SHA validated.
+- **Stock module short SHA** `6558a72298ed`: HTTP **404**.
+
+Thus, the **short-hash lookup works** on the official `kernel/common` Gitiles repository, but the stock module revision does not resolve **in that repository** using this method. This is evidence that the module may come from another source tree or a commit no longer reachable there, **not** proof the source revision never existed or that its exact code is unavailable anywhere.
+
+No CRC compilation was performed because no matching source was verified. Do not rerun GKI r14 as a substitute. The practical next step is to identify the wireless module source tree or inspect its actual BTF/type information against the built headers while preserving the binary.
