@@ -1,0 +1,100 @@
+name: XT2615-1 Nevada - DebugFS mac80211 ABI CRC Control
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/nevada-mac80211-debugfs-crc-control.sh'
+      - 'ci/nevada-stock-ieee80211-ops-btf-evidence.json'
+      - '.github/workflows/XT2615-Nevada-mac80211-DEBUGFS-CRC.yml'
+      - 'NEVADA-MAC80211-DEBUGFS-CRC.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-mac80211-debugfs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  debugfs-abi-probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      MOTO_BRANCH: android-16-release-w1wn36.18-114
+      MOTO_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+      STOCK_CONFIG_SHA256: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout diagnostic script and BTF evidence
+        uses: actions/checkout@v4
+
+      - name: Validate stock config and preserved BTF evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$STOCK_CONFIG_SHA256  ci/xt2615-nevada-stock.config" | sha256sum -c -
+          python3 - <<'PY'
+          import json
+          p='ci/nevada-stock-ieee80211-ops-btf-evidence.json'
+          e=json.load(open(p))
+          a=e['split_btf']
+          assert a['member_count'] == 115 and a['size_bytes'] == 920
+          assert [x['name'] for x in a['member_neighbors']]==['sta_add','sta_remove','sta_notify']
+          assert a['module_local_string_base_offset']==2390229
+          assert e['stock_mac80211_export_crc_ieee80211_alloc_hw_nm']=='0x561b7fc2'
+          print('PASS: preserved stock BTF structural evidence')
+          PY
+
+      - name: Install LLVM ARM64 kernel prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4 file
+          clang --version | head -1
+
+      - name: Fetch pinned Motorola public kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --filter=blob:none --single-branch \
+            --branch "$MOTO_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/moto-src"
+          test "$(git -C "$RUNNER_TEMP/moto-src" rev-parse HEAD)" = "$MOTO_SHA"
+          grep -q '^#ifdef CONFIG_MAC80211_DEBUGFS' "$RUNNER_TEMP/moto-src/include/net/mac80211.h"
+          grep -q 'sta_add_debugfs' "$RUNNER_TEMP/moto-src/include/net/mac80211.h"
+
+      - name: FullLTO CRC test with optional callback disabled and enabled
+        shell: bash
+        timeout-minutes: 24
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/moto-src
+          OUT_ROOT: ${{ runner.temp }}/nevada-debugfs-crc
+          STOCK_CONFIG: ${{ github.workspace }}/ci/xt2615-nevada-stock.config
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-mac80211-debugfs-crc-control.sh 2>&1 |
+            tee "$RUNNER_TEMP/nevada-debugfs-crc.log"
+
+      - name: Upload CRC reports and resolved configs, no modules
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-DEBUGFS-MAC80211-CRC-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/nevada-debugfs-crc/evidence/
+          retention-days: 7
+
+      - name: Upload compiler and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-DEBUGFS-MAC80211-CRC-logs
+          path: ${{ runner.temp }}/nevada-debugfs-crc.log
+          if-no-files-found: ignore
+          retention-days: 7
