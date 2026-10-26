@@ -1,0 +1,61 @@
+{
+  "device": "Motorola XT2615-1 / nevada / Android 16",
+  "source": "Read-only parsed .BTF from SHA256-confirmed stock mac80211.ko in preserved vendor_boot_a.img; prior live module GNU Build-ID matched the recovered copy",
+  "stock_sha256": "f404b741cda2012557d567efec688148e7d4578e127b1de4f347e7f8f8445e87",
+  "stock_export_crc_ieee80211_alloc_hw_nm": "0x561b7fc2",
+  "btf": {
+    "struct": "ieee80211_ops",
+    "size_bytes": 920,
+    "number_of_members": 115,
+    "module_local_member_names_decoded": 98,
+    "external_base_member_names_unresolved": 17,
+    "module_local_string_base_offset": 2390229,
+    "observed": [
+      {
+        "member_index": 31,
+        "name": "sta_add",
+        "offset_bits": 1984
+      },
+      {
+        "member_index": 32,
+        "name": "sta_remove",
+        "offset_bits": 2048
+      },
+      {
+        "member_index": 33,
+        "name": "sta_notify",
+        "offset_bits": 2112
+      },
+      {
+        "member_index": 50,
+        "name": "testmode_cmd",
+        "offset_bits": 3200
+      },
+      {
+        "member_index": 51,
+        "name": "testmode_dump",
+        "offset_bits": 3264
+      },
+      {
+        "member_index": 78,
+        "name": "ipv6_addr_change",
+        "offset_bits": 4992
+      },
+      {
+        "member_index": 110,
+        "name": "set_radar_background",
+        "offset_bits": 7040
+      }
+    ],
+    "note": "The verified local string slots show NL80211_TESTMODE callbacks present and MAC80211_DEBUGFS callback absent. Names referenced from the mismatched external BTF base are NOT verified."
+  },
+  "hypothesis": "The stock separately-built wireless module has CONFIG_NL80211_TESTMODE enabled; the working Android base kernel's original .config does not disclose its wireless module build config.",
+  "source_reference": {
+    "repository": "MotorolaMobilityLLC/kernel-mtk",
+    "commit": "0fa176ca7f56c349b51acd83684284c02ced5854",
+    "header": "include/net/mac80211.h",
+    "config_symbol": "CONFIG_NL80211_TESTMODE",
+    "condition": "#ifdef CONFIG_NL80211_TESTMODE"
+  },
+  "risk": "CRC equality alone cannot authorize loading AR9271: all imported symbols, CFI, loader policy, firmware and true kernel ABI still require verification."
+}
