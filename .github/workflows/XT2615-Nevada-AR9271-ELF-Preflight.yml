@@ -1,0 +1,35 @@
+name: XT2615-1 Nevada - AR9271 Stock ELF ABI Preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/nevada-ar9271-stock-elf-preflight.py'
+      - 'ci/nevada-abi-preflight-selftest.py'
+      - 'ci/nevada-stock-wifi-vs-ath9k-htc-crcs.csv'
+      - 'NEVADA-AR9271-STOCK-ELF-PREFLIGHT.md'
+      - '.github/workflows/XT2615-Nevada-AR9271-ELF-Preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-preserved-abi-evidence:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout sanitized ABI data and read-only analyzer
+        uses: actions/checkout@v4
+      - name: Compile-check the Python ELF CRC analyzer
+        run: python3 -m py_compile scripts/nevada-ar9271-stock-elf-preflight.py
+      - name: Verify parser mechanics and SHA-verified sanitized CRC evidence
+        run: python3 ci/nevada-abi-preflight-selftest.py
+      - name: Preserve proof-only test log
+        if: always()
+        run: |
+          echo "No stock or experimental binaries are kept in this repository."
+          echo "This workflow validates parser semantics + saved evidence."
+          echo "It does NOT execute an actual stock ELF comparison in GitHub Actions."
+          echo "Critical known mismatch: ieee80211_alloc_hw_nm."
+          echo "NEVER flash or insmod the experimental AR9271 kernel modules."
