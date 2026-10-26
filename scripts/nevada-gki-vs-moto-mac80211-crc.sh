@@ -34,12 +34,17 @@ for flavor in motorola gki; do
     scripts/config --file "$out/.config" --enable MODVERSIONS
     scripts/config --file "$out/.config" --disable TRIM_UNUSED_KSYMS
     scripts/config --file "$out/.config" --set-str UNUSED_KSYMS_WHITELIST ""
+    # CRC analysis uses readelf on the resulting object. ThinLTO emits
+    # LLVM bitcode (.o), which is NOT an ELF object; disable LTO for
+    # this targeted genksyms-only comparison, equally on both sources.
     scripts/config --file "$out/.config" --disable LTO_CLANG_FULL
-    scripts/config --file "$out/.config" --enable LTO_CLANG_THIN
+    scripts/config --file "$out/.config" --disable LTO_CLANG_THIN
+    scripts/config --file "$out/.config" --enable LTO_NONE
     make -j2 "${args[@]}" olddefconfig
     grep -qx 'CONFIG_CFG80211=m' "$out/.config"
     grep -qx 'CONFIG_MAC80211=m' "$out/.config"
     grep -qx 'CONFIG_MODVERSIONS=y' "$out/.config"
+    grep -qx 'CONFIG_LTO_NONE=y' "$out/.config"
 
     make -j2 "${args[@]}" prepare scripts
     make -j2 "${args[@]}" KBUILD_SYMTYPES=1 net/mac80211/main.o
@@ -49,6 +54,8 @@ for flavor in motorola gki; do
   symtypes="$out/net/mac80211/main.symtypes"
   test -s "$obj"
   test -s "$symtypes"
+  file "$obj" | tee "$report/$flavor-object-filetype.txt"
+  readelf -h "$obj" | grep -E 'Class:|Type:|Machine:'
   readelf -sW "$obj" > "$report/$flavor-main-symbols.txt"
   grep -F '__crc_ieee80211_alloc_hw_nm' "$report/$flavor-main-symbols.txt" |
     tee "$report/$flavor-target-export.txt"
