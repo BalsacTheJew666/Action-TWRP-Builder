@@ -1,0 +1,41 @@
+{
+  "device": "Motorola XT2615-1 nevada",
+  "firmware": "Android 16",
+  "source": "Stock mac80211.ko recovered from user's preserved vendor_boot_a.img; ELF Build-ID previously matched on-device module",
+  "stock_mac80211_sha256": "f404b741cda2012557d567efec688148e7d4578e127b1de4f347e7f8f8445e87",
+  "stock_mac80211_export_crc_ieee80211_alloc_hw_nm": "0x561b7fc2",
+  "split_btf": {
+    "struct": "ieee80211_ops",
+    "member_count": 115,
+    "size_bytes": 920,
+    "member_neighbors": [
+      {
+        "index_zero_based": 31,
+        "name": "sta_add",
+        "name_offset": 2399946
+      },
+      {
+        "index_zero_based": 32,
+        "name": "sta_remove",
+        "name_offset": 2399954
+      },
+      {
+        "index_zero_based": 33,
+        "name": "sta_notify",
+        "name_offset": 2399965
+      }
+    ],
+    "module_local_string_base_offset": 2390229,
+    "current_boot_base_btf_string_size": 2393441,
+    "note": "Module local BTF string offsets can be recovered. For offsets below 2390229, names depend on a separate nonmatching base BTF and MUST NOT be treated as validated. No sta_add_debugfs callback occurs between sta_remove and sta_notify."
+  },
+  "public_source": {
+    "repository": "MotorolaMobilityLLC/kernel-mtk",
+    "commit": "0fa176ca7f56c349b51acd83684284c02ced5854",
+    "header": "include/net/mac80211.h",
+    "conditional_callback": "sta_add_debugfs",
+    "controlled_by": "CONFIG_MAC80211_DEBUGFS",
+    "note": "Header conditionally compiles the callback. Missing field in the module BTF could reflect configuration, not source divergence."
+  },
+  "conclusion": "Test whether toggling CONFIG_MAC80211_DEBUGFS changes generated ieee80211_alloc_hw_nm CRC using FullLTO. Results not install authorization."
+}
