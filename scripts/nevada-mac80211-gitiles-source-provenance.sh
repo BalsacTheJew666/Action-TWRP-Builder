@@ -3,7 +3,7 @@
 # user's loaded mac80211.ko. Does not load/install any module or touch phone.
 set -Eeuo pipefail
 : "${WORK_DIR:?Missing WORK_DIR}"
-: "${FOUND_OUTPUT:?Missing FOUND_OUTPUT}"
+FOUND_OUTPUT="${FOUND_OUTPUT:-${GITHUB_OUTPUT:?Missing GITHUB_OUTPUT}}"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 prefix=6558a72298ed
