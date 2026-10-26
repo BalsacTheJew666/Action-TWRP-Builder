@@ -1,0 +1,103 @@
+name: XT2615-1 Nevada - Exact GKI r14 mac80211 CRC
+
+# Non-installable source verification for the kernel revision named by uname -r.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-GKI-r14-CRC.yml'
+      - 'NEVADA-GKI-R14-CRC.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-gki-r14-crc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  exact-gki-r14-crc:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    env:
+      GKI_TAG: android13-5.15-2025-05_r14
+      GKI_EXPECT_SHA_PREFIX: 9b2308ac0ad6
+      STOCK_CONFIG_SHA256: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout comparison scripts
+        uses: actions/checkout@v4
+
+      - name: Verify the user-provided running kernel config
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$STOCK_CONFIG_SHA256  ci/xt2615-nevada-stock.config" |
+            sha256sum -c -
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' ci/xt2615-nevada-stock.config
+          grep -qx 'CONFIG_MODVERSIONS=y' ci/xt2615-nevada-stock.config
+
+      - name: Install LLVM and ARM64 kernel prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4 file
+          clang --version | head -1
+          df -h /
+
+      - name: Fetch exact official Android GKI r14 release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub mirror may not expose this tag. Prefer the official
+          # Android Gitiles source, not a moving branch.
+          git clone -q --depth 1 --single-branch --filter=blob:none \
+            --branch "$GKI_TAG" \
+            https://android.googlesource.com/kernel/common \
+            "$RUNNER_TEMP/gki-r14"
+          actual="$(git -C "$RUNNER_TEMP/gki-r14" rev-parse HEAD)"
+          echo "Exact fetched GKI commit: $actual"
+          [[ "$actual" == "$GKI_EXPECT_SHA_PREFIX"* ]] || {
+            echo "::error::Official GKI tag no longer resolves to expected firmware commit prefix."
+            exit 1
+          }
+          VERSION="$(make -s -C "$RUNNER_TEMP/gki-r14" kernelversion)"
+          echo "Source kernelversion: $VERSION"
+          test "$VERSION" = "5.15.180"
+
+      - name: Compare module CRC across no LTO, ThinLTO and FullLTO
+        shell: bash
+        timeout-minutes: 55
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/gki-r14
+          OUT_ROOT: ${{ runner.temp }}/gki-r14-crc
+          STOCK_CONFIG: ${{ github.workspace }}/ci/xt2615-nevada-stock.config
+        run: |
+          set -euo pipefail
+          # Uses the same CI probe as the Motorola source experiment.
+          # Only net/mac80211/main.o is compiled. No installable modules.
+          bash scripts/nevada-mac80211-lto-crc-matrix.sh 2>&1 |
+            tee "$RUNNER_TEMP/gki-r14-crc.log"
+
+      - name: Upload analysis-only CRC and type traces
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-EXACT-GKI-R14-mac80211-CRC-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/gki-r14-crc/evidence/
+          retention-days: 7
+
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-EXACT-GKI-R14-logs
+          path: ${{ runner.temp }}/gki-r14-crc.log
+          if-no-files-found: ignore
+          retention-days: 7
