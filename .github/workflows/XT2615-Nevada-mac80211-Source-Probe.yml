@@ -51,7 +51,6 @@ jobs:
         timeout-minutes: 12
         env:
           WORK_DIR: ${{ runner.temp }}/mac80211-source
-          FOUND_OUTPUT: ${{ github.output }}
         run: |
           set -euo pipefail
           bash scripts/nevada-mac80211-gitiles-source-provenance.sh 2>&1 |
