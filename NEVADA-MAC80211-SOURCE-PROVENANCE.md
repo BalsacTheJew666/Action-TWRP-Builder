@@ -21,6 +21,14 @@ Attempt to resolve `6558a72298ed` directly in the **official Android common-kern
 
 Gitiles' ability to resolve abbreviated Git IDs or allow fetch-by-hash is uncertain. A failed lookup does not prove Motorola's module was never built from that source; it means the source is not verified through this method.
 
+
+## Static evidence rechecked from preserved recovery binaries (Oct 26, 2026)
+
+- Both stock `mac80211.ko` and `cfg80211.ko` contain **`scmversion=g6558a72298ed`** within their actual ELF `.modinfo` section; this is not merely a user-entered kernel version.
+- The stock `mac80211.ko` `.comment` section identifies **Android (8508608, based on r450784e) Clang 14.0.7**, exact LLVM source `4c603efb0cca074e9238af8b4106c30add4418f6`.
+- Recovered stock `mac80211.ko` GNU Build-ID: **`a1e463aa49179d3da609f3d73f45e753292fad59`**; SHA256 **`f404b741cda2012557d567efec688148e7d4578e127b1de4f347e7f8f8445e87`**. Recovered stock `cfg80211.ko` SHA256: **`85f877d3866f0668fea72a725e1506fd0979d9e636e94e69c0f3328f917dcb90`**.
+- The initial CI attempt #40274035814 yielded HTTP 404 for short SHA `6558a72298ed`, and correctly skipped CRC compilation. A later control was added to test whether **known** source SHA `9b2308ac0ad6` resolves through the same Gitiles short-SHA method. Until that positive control is checked, the earlier HTTP 404 must **not** be interpreted as proof the requested commit is missing.
+
 ## Safety and interpretation
 
 - Read-only CI research; no phone scripts, `.ko` packages, boot images, flash, or module loading.
