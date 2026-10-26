@@ -1,0 +1,101 @@
+name: XT2615-1 Nevada - Exact mac80211 GKI Source Probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/nevada-mac80211-gitiles-source-provenance.sh'
+      - '.github/workflows/XT2615-Nevada-mac80211-Source-Probe.yml'
+      - 'NEVADA-MAC80211-SOURCE-PROVENANCE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-mac80211-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-mac80211-source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    env:
+      STOCK_CONFIG_SHA256: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout existing diagnostic tools
+        uses: actions/checkout@v4
+
+      - name: Verify user-provided kernel config
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$STOCK_CONFIG_SHA256  ci/xt2615-nevada-stock.config" | sha256sum -c -
+
+      - name: Install tools for source verification and ABI probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git curl ca-certificates python3 clang lld llvm \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            rsync cpio xz-utils zstd lz4 file
+          clang --version | head -1
+
+      - name: Resolve exact mac80211 Git SHA from official Google source
+        id: locate
+        shell: bash
+        timeout-minutes: 12
+        env:
+          WORK_DIR: ${{ runner.temp }}/mac80211-source
+          FOUND_OUTPUT: ${{ github.output }}
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-mac80211-gitiles-source-provenance.sh 2>&1 |
+            tee "$RUNNER_TEMP/mac80211-source-lookup.log"
+
+      - name: Compare source CRC against live firmware if exact source verified
+        if: steps.locate.outputs.found == 'true'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/mac80211-source/source
+          OUT_ROOT: ${{ runner.temp }}/mac80211-exact-crc
+          STOCK_CONFIG: ${{ github.workspace }}/ci/xt2615-nevada-stock.config
+        run: |
+          set -euo pipefail
+          bash scripts/nevada-mac80211-lto-crc-matrix.sh 2>&1 |
+            tee "$RUNNER_TEMP/mac80211-exact-crc.log"
+
+      - name: Upload exact Git source verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-mac80211-GITILES-SOURCE-VERIFICATION
+          path: |
+            ${{ runner.temp }}/mac80211-source/source-provenance.txt
+            ${{ runner.temp }}/mac80211-source/resolved-commit.txt
+            ${{ runner.temp }}/mac80211-source-lookup.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload generated ABI CRC report only
+        if: steps.locate.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-mac80211-EXACT-SOURCE-CRC-NOT-INSTALLABLE
+          path: ${{ runner.temp }}/mac80211-exact-crc/evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload optional build diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-mac80211-EXACT-SOURCE-COMPILE-LOG
+          path: ${{ runner.temp }}/mac80211-exact-crc.log
+          if-no-files-found: ignore
+          retention-days: 7
