@@ -38,3 +38,7 @@ For each, read `__crc_ieee80211_alloc_hw_nm` directly from `main.o` as calculate
 - Even a symbol CRC match alone does not establish vermagic, signatures, CFI/LTO, all imported CRCs, or safe module loading.
 
 Source context: Android `android13-5.15` May 2025 kernel version listings in official AOSP kernel release documentation.
+
+## CI correction (October 25, 2026)
+
+First PR CI run #40246963885 reached compilation but failed at `readelf`: ThinLTO emitted LLVM bitcode as `main.o`, not an ELF relocatable object. Follow-up commit `32245e798babb0d7625812eb947a43df41cd8444` disables LTO identically for **both diagnostic object builds**, verifies `CONFIG_LTO_NONE=y`, and checks the object format before CRC extraction. The result is still an analysis-only build and not stock-ABI compatible.
