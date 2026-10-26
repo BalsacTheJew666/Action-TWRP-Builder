@@ -10,7 +10,6 @@ prefix=6558a72298ed
 url='https://android.googlesource.com/kernel/common'
 export GIT_TERMINAL_PROMPT=0
 report="$WORK_DIR/source-provenance.txt"
-echo 'found=false' >> "$FOUND_OUTPUT"
 {
   echo "Device: Motorola XT2615-1 nevada / Android 16"
   echo "Running kernel: 5.15.180-android13-8-00018-g9b2308ac0ad6-ab14563692"
@@ -49,6 +48,7 @@ fi
 
 if [[ ! -s "$WORK_DIR/resolved-commit.txt" ]]; then
   echo "SOURCE_NOT_VERIFIED: No exact published SHA resolved; no fallback." | tee -a "$report"
+  echo "found=false" >> "$FOUND_OUTPUT"
   exit 0
 fi
 
@@ -60,12 +60,14 @@ git remote add origin "$url"
 if ! timeout 240 git -c protocol.version=2 fetch --quiet \
   --no-tags --depth=1 origin "$exact_sha"; then
   echo "SOURCE_NOT_VERIFIED: Official server did not allow direct fetch." | tee -a "$report"
+  echo "found=false" >> "$FOUND_OUTPUT"
   exit 0
 fi
 git checkout -q --detach FETCH_HEAD
 actual="$(git rev-parse HEAD)"
 if [[ "$actual" != "$exact_sha" ]]; then
   echo "SOURCE_NOT_VERIFIED: Git checkout SHA mismatch" | tee -a "$report"
+  echo "found=false" >> "$FOUND_OUTPUT"
   exit 0
 fi
 kernelversion="$(make -s kernelversion)"
@@ -73,10 +75,9 @@ echo "Fetched exact source SHA: $actual" | tee -a "$report"
 echo "Fetched source Linux version: $kernelversion" | tee -a "$report"
 if [[ "$kernelversion" != 5.15.180 ]]; then
   echo "SOURCE_NOT_VERIFIED: Linux version differs from stock mac80211 module." | tee -a "$report"
+  echo "found=false" >> "$FOUND_OUTPUT"
   exit 0
 fi
 echo "SOURCE_VERIFIED: Exact mac80211 SHA exists and source tree version matches." | tee -a "$report"
-# GitHub output needs only one unique value per key. The workflow uses the
-# last value from a multi-line output (standard GitHub runner semantics).
 echo 'found=true' >> "$FOUND_OUTPUT"
 echo "sha=$actual" >> "$FOUND_OUTPUT"
