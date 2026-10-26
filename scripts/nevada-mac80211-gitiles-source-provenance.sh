@@ -18,6 +18,38 @@ report="$WORK_DIR/source-provenance.txt"
   echo "Requested candidate source SHA prefix: $prefix"
   echo "Official source repository: $url"
 } > "$report"
+echo "=== Validating Gitiles short-SHA lookup with known kernel commit ==="
+known_full='9b2308ac0ad616788fb57ba688aa07f0ff221355'
+known_short='9b2308ac0ad6'
+for type in full short; do
+  if [[ "$type" == full ]]; then target="$known_full"; else target="$known_short"; fi
+  code="$(curl -sSL --retry 1 --connect-timeout 15 --max-time 40 \
+    -w '%{http_code}' -o "$WORK_DIR/positive-control-$type.json" \
+    "$url/+/$target?format=JSON" || true)"
+  echo "Gitiles positive control ($type): HTTP $code" | tee -a "$report"
+  if [[ "$code" == "200" ]]; then
+    if python3 - "$WORK_DIR/positive-control-$type.json" "$known_full" <<'PY'
+import json,sys
+from pathlib import Path
+s=Path(sys.argv[1]).read_text()
+if s.startswith(")]}'"): s=s.split('\n',1)[1]
+d=json.loads(s)
+commit=d.get('commit')
+if commit != sys.argv[2]:
+    raise SystemExit('Positive control SHA did not match the known GKI release')
+print('Positive control verified:',commit)
+PY
+    then
+      echo "Gitiles positive control ($type): verified" | tee -a "$report"
+    else
+      echo "Gitiles positive control ($type): malformed or unexpected content" | tee -a "$report"
+    fi
+  fi
+done
+if ! grep -q 'Gitiles positive control (short): verified' "$report"; then
+  echo "LOOKUP_METHOD_NOT_VALIDATED: known public GKI commit did not resolve via short SHA; target 404 would be inconclusive." | tee -a "$report"
+fi
+
 echo "=== Resolving exact commit $prefix via official Android Gitiles ==="
 
 # Gitiles returns JSON preceded by a 4-character XSSI prefix. It can resolve
@@ -44,6 +76,10 @@ PY
   fi
 else
   echo "Gitiles abbreviated SHA lookup unavailable or not found." >> "$report"
+fi
+
+if [[ ! -s "$WORK_DIR/resolved-commit.txt" ]] && ! grep -q 'Gitiles positive control (short): verified' "$report"; then
+  echo "LOOKUP_UNRELIABLE: No exact source could be verified and Gitiles short-SHA lookups did not pass the positive control." | tee -a "$report"
 fi
 
 if [[ ! -s "$WORK_DIR/resolved-commit.txt" ]]; then
