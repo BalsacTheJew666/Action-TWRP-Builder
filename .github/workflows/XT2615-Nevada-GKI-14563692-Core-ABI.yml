@@ -1,0 +1,142 @@
+name: XT2615-1 Nevada - Official GKI 14563692 AR9271 Core CRC
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-GKI-14563692-Core-ABI.yml'
+      - 'scripts/nevada-ar9271-official-gki-core-crc.py'
+      - 'NEVADA-GKI-14563692-CORE-ABI.md'
+      - 'scripts/nevada-ar9271-live-loader-audit.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nevada-gki14563692-core-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  official-core-reference:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      SOURCE_GKI_TAG: android13-5.15-2025-05_r14
+      SOURCE_SHA: 9b2308ac0ad616788fb57ba688aa07f0ff221355
+      SOURCE_GKI_CI_BUILD: '14563692'
+      VERIFIED_AR9271_RUN: '40413637325'
+      VERIFIED_AR9271_ARTIFACT: nevada-AR9271-TESTMODE-30-CRC-DIAGNOSTIC-NOT-INSTALLABLE
+      GKI_SYMVERS_URL: https://ci.android.com/builds/submitted/14563692/kernel_aarch64/latest/raw/vmlinux.symvers
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout analysis code only
+        uses: actions/checkout@v4
+
+      - name: Verify source-to-build identity using signed-off public release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/verified"
+          # The Google GKI release tag explicitly records matching
+          # commit 9b2308ac0ad6 and artifacts build 14563692.
+          printf 'Android GKI tag: %s\ncommit: %s\nofficial build ID: %s\n' \
+            "$SOURCE_GKI_TAG" "$SOURCE_SHA" "$SOURCE_GKI_CI_BUILD" |
+              tee "$RUNNER_TEMP/verified/PROVENANCE.txt"
+          python3 -m py_compile scripts/nevada-ar9271-official-gki-core-crc.py
+          sh -n scripts/nevada-ar9271-live-loader-audit.sh
+          echo 'PASS: on-device audit script shell syntax; execution reserved for user-controlled phone'
+
+      - name: Retrieve prior successful AR9271 diagnostic artifact
+        id: modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/experimental"
+          if gh run download "$VERIFIED_AR9271_RUN" \
+             --repo "$GH_REPO" \
+             --name "$VERIFIED_AR9271_ARTIFACT" \
+             --dir "$RUNNER_TEMP/experimental"; then
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+            echo "Previous all-30-Wi-Fi-CRC-pass artifact downloaded."
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+            echo 'Cannot fetch previous diagnostic artifact (possibly expired). Core comparison NOT performed.' \
+              | tee "$RUNNER_TEMP/verified/ARTIFACT-UNAVAILABLE.txt"
+          fi
+
+      - name: Retrieve exact official Google GKI kernel exported symbol CRCs
+        id: official
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/verified/official-GKI-14563692-vmlinux.symvers"
+          if curl -fLSs --retry 2 --connect-timeout 15 --max-time 90 \
+              "$GKI_SYMVERS_URL" -o "$file"; then
+            if python3 - "$file" <<'PY'
+          import pathlib,re,sys
+          p=pathlib.Path(sys.argv[1])
+          n=0
+          for line in p.read_text(errors='replace').splitlines():
+              fields=line.split()
+              if len(fields)>=3 and fields[2]=='vmlinux' and re.fullmatch(r'0x[0-9a-fA-F]{8}',fields[0]):
+                  n+=1
+          if n<1000:
+              raise SystemExit('FAIL: download did not contain valid vmlinux.symvers: '+str(n))
+          print('Official GKI exported symbol rows:',n)
+          PY
+            then
+              echo 'found=true' >> "$GITHUB_OUTPUT"
+              echo "Official artifact validated."
+            else
+              echo 'found=false' >> "$GITHUB_OUTPUT"
+              rm -f "$file"
+              echo 'Official download did not contain vmlinux.symvers. NO comparison is possible.' \
+                | tee "$RUNNER_TEMP/verified/OFFICIAL-REFERENCE-UNAVAILABLE.txt"
+            fi
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+            echo 'Official Google GKI artifact could not be downloaded. NO compatibility claim.' \
+              | tee "$RUNNER_TEMP/verified/OFFICIAL-REFERENCE-UNAVAILABLE.txt"
+          fi
+
+      - name: Compare all four module imports to exact released GKI CRCs
+        if: steps.modules.outputs.found == 'true' && steps.official.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Expected local artifact root has four module files and diagnostics.
+          test -f "$RUNNER_TEMP/experimental/ath9k_htc.ko"
+          python3 scripts/nevada-ar9271-official-gki-core-crc.py \
+            "$RUNNER_TEMP/experimental" \
+            "$RUNNER_TEMP/verified/official-GKI-14563692-vmlinux.symvers" \
+            "ci/nevada-stock-wifi-vs-ath9k-htc-crcs.csv" \
+            "$RUNNER_TEMP/verified"
+
+      - name: Preserve result/status if reference or Atheros artifact missing
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/verified"
+          test -f "$RUNNER_TEMP/verified/official-gki-core-crc-audit.json" ||
+            printf 'CORE-CRC COMPARISON NOT COMPLETED.\nSee provenance and diagnostic logs.\nNo flashing/loading authorization.\n' \
+              > "$RUNNER_TEMP/verified/COMPARISON-NOT-COMPLETED.txt"
+          echo 'Only reports are uploaded. No Atheros ELF modules, no boot images.'
+
+      - name: Upload research-only result evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-AR9271-GKI-14563692-OFFICIAL-CORE-CRC-DIAGNOSTIC
+          path: |
+            ${{ runner.temp }}/verified/PROVENANCE.txt
+            ${{ runner.temp }}/verified/ARTIFACT-UNAVAILABLE.txt
+            ${{ runner.temp }}/verified/OFFICIAL-REFERENCE-UNAVAILABLE.txt
+            ${{ runner.temp }}/verified/COMPARISON-NOT-COMPLETED.txt
+            ${{ runner.temp }}/verified/README-OFFICIAL-GKI-CORE-RESULTS.txt
+            ${{ runner.temp }}/verified/official-gki-core-crc-audit.json
+          if-no-files-found: warn
+          retention-days: 14
