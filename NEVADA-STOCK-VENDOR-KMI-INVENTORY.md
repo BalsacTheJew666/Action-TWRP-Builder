@@ -7,7 +7,7 @@
 - The stock Motorola kernel was built with \`CONFIG_TRIM_UNUSED_KSYMS=y\` and references a private \`abi_symbollist.raw\`. The 8,473 names are **not verified as the genuine original Motorola KMI**.
 - The rooted handset's prior on-device audit loaded **181 already-loaded stock module ELF files**, collapsed 181 Android mount aliases, and corroborated 82/101 AR9271 unique experimental core import CRC requirements with zero conflicts.
 
-The next missing evidence is **which imports Motorola stock/vendor modules actually require** that are not exported from Google's public GKI build. A list of all original module *imports* narrows down the missing dependencies, but does not prove which providers are exports from \`vmlinux\` vs other stock \`.ko\`.
+PR #27 already inventories **already-loaded** stock modules. This supplementary audit also checks **unloaded on-disk** module files from the normal stock module partitions, potentially identifying additional vendor dependencies missing from the public GKI export set. This is not a replacement for PR #27's loaded-module evidence. The next missing evidence is **which imports Motorola stock/vendor modules actually require** that are not exported from Google's public GKI build. A list of all original module *imports* narrows down the missing dependencies, but does not prove which providers are exports from \`vmlinux\` vs other stock \`.ko\`.
 
 ## What this tool actually does
 
@@ -25,7 +25,7 @@ Output categories:
 - \`public_gki_crc_conflict\`: stock module imported CRC differs from the official GKI symbol's CRC. This is an ABI investigation point; no conclusion about the live kernel's actual exports is warranted.
 - \`not_in_public_gki\`: a stock module imports a symbol absent from the public GKI \`vmlinux\` table. **It might come from another stock \`.ko\`**, or from a Motorola-modified core kernel. Do NOT automatically place all such names in a GKI-only whitelist: provider classification is still required.
 
-The script does NOT export or upload the original vendor ELF module bytes, boot images, keys or firmware. The report is local and intentionally does NOT certify module loading, signature, CFI, \`vermagic\` or safe flashing.
+The local script verifies the pinned official GKI symvers SHA256 `bdcf93a69e5513ffefd916f9b9cceaf4c1f14657e3aeaf52bb0cd0cd5ea655c0` and writes its local JSON report with owner-only (`0600`) permissions. It does NOT export or upload the original vendor ELF module bytes, boot images, keys or firmware. The report is local and intentionally does NOT certify module loading, signature, CFI, \`vermagic\` or safe flashing.
 
 ## Run safely using your existing connected Termux + GitHub CLI
 
@@ -33,7 +33,7 @@ The script does NOT export or upload the original vendor ELF module bytes, boot 
 cd "$HOME/nevada-live-kmi" || exit 1
 
 gh api -H "Accept: application/vnd.github.raw+json" \
-  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-stock-vendor-kmi-import-inventory.py?ref=nevada-stock-vendor-kmi-import-inventory" \
+  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-stock-vendor-kmi-import-inventory.py?ref=main" \
   > nevada-stock-vendor-kmi-import-inventory.py.new || exit 1
 
 gh api -H "Accept: application/vnd.github.raw+json" \
