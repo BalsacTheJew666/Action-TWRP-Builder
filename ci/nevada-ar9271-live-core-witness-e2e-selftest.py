@@ -89,3 +89,27 @@ with tempfile.TemporaryDirectory(prefix="nevada-witness-selftest-") as temp:
         assert not files and root_status["status"]=="FileNotFoundError"
         print("PASS: missing root access is labeled as unavailable, not a CRC mismatch")
 
+
+    # Regression for Android's duplicate /vendor and /vendor_dlkm mount aliases.
+    # Distinct paths with identical ELF bytes are safe corroborating witnesses.
+    import os
+    copy1=modules/"duplicate-one.ko"
+    copy2=modules/"duplicate-two.ko"
+    copy1.write_bytes(synthetic_elf())
+    copy2.write_bytes(synthetic_elf())
+    blob,status,collapsed=witness.select_matching_module([copy1,copy2])
+    assert blob==synthetic_elf()
+    assert status=="identical_duplicate_sources" and collapsed==0,(status,collapsed)
+    print("PASS: identical .ko copies in distinct paths can be counted once")
+
+    symlink=modules/"alias.ko"
+    symlink.symlink_to(copy1)
+    blob,status,collapsed=witness.select_matching_module([copy1,symlink])
+    assert blob==synthetic_elf()
+    assert status=="unique_source" and collapsed==1,(status,collapsed)
+    print("PASS: symlink/bind-style identical inode is collapsed")
+
+    copy2.write_bytes(synthetic_elf().replace(b"usb_submit_urb",b"usb_regist_urb"))
+    blob,status,collapsed=witness.select_matching_module([copy1,copy2])
+    assert blob is None and status=="different_binaries_same_module_name",status
+    print("PASS: genuinely different module binaries are never auto-selected")
