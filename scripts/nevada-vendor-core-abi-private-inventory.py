@@ -206,7 +206,12 @@ def main():
     # Keep local output readable only to the Termux owner by default.
     os.umask(0o077)
     args.report.parent.mkdir(parents=True,exist_ok=True)
-    args.report.write_text(json.dumps(report,indent=2)+"\n")
+    with os.fdopen(os.open(args.report,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),
+                   "w",encoding="utf-8") as stream:
+        stream.write(json.dumps(report,indent=2)+"\n")
+    # Existing files can have broader permissions; never leave full symbol
+    # metadata world-readable just because the path predated the scan.
+    os.chmod(args.report,0o600)
     print("===== MOTOROLA NEVADA LOCAL PRIVATE VENDOR ABI IMPORT INVENTORY =====")
     print("Mode:",report["mode"])
     print("Kernel:",report["running_kernel_release"])
