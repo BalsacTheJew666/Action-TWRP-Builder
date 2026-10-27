@@ -95,3 +95,33 @@ python witness.py \
 If the report still says \`loaded ELF module files read: 0\`, share **only** the \`Module path discovery\` summary. It would suggest a different mounted module location, compressed module storage, or a Termux/root mount-namespace mismatch requiring another **read-only** inspection.
 
 This remains a **corroborating** module-import witness check; it cannot establish on-device core exports, driver loadability, module-signature behavior, CFI, correct \`vermagic\`, USB OTG, firmware or safe installation. The two missing \`rfkill_pause_polling\` and \`usb_get_urb\` exports remain blockers regardless of the witness count.
+
+
+## Confirmed next diagnostic (Oct 27, 2026): 362 paths found, zero ELF objects selected
+
+The rooted phone now reports **362 matching .ko paths from unprivileged discovery** and **362 matching .ko paths from root \`find\`**, with 392 total .ko paths enumerated by root. This makes the previous explanation ("no access to module directories") unlikely. The previous program discarded any loaded module basename with \`len(paths)!=1\`, and the Android bind mounts and mounted partition aliases can expose multiple paths for the same file. Because no \`ambiguous_module_names\` details were included in the console, this is a **strong hypothesis rather than proven root cause**; the JSON contains those diagnostics.
+
+The improved selection is strict but no longer rejects byte-for-byte identical copies:
+
+1. Collapse paths pointing to the same canonical filesystem object (\`st_dev\` + \`st_ino\`; or canonical path when \`stat()\` fails).
+2. For any remaining independent paths with the same module name, read each \`.ko\` and verify their full **SHA256** values match; only then count a single witness.
+3. If binaries differ, files are unreadable, corrupted, or the candidate set is unreasonably large, **reject** that ambiguous module rather than guessing which one was loaded.
+4. Print counts and samples for aliases, differing names, unreadable or malformed files and missing paths. This makes the next run diagnostic even if no witness can be counted.
+
+GitHub Actions unit tests exercise symlink aliases, byte-identical copies at different paths and truly different module binaries. This changes only the **read-only audit script**; no system Wi-Fi or kernel file is modified.
+
+### Termux rerun
+
+~~~bash
+cd "$HOME/nevada-live-kmi" || exit 1
+gh api -H "Accept: application/vnd.github.raw+json" \
+  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-ar9271-live-core-kmi-witness.py?ref=nevada-live-kmi-identical-module-alias-dedup" \
+  > witness.py.new && \
+python -m py_compile witness.py.new && \
+mv witness.py.new witness.py && \
+python witness.py \
+  --manifest core-kmi.tsv \
+  --output live-core-kmi.json
+~~~
+
+Please share the lines beginning \`Module candidate resolution:\`, \`Unreadable:\`, \`Kernel:\`, and \`X/101 symbol matches\`. The script still cannot certify actual live core exports, CFI, module signing or safe driver loading. Do not flash/insmod experimental \`ath9k_htc\`.

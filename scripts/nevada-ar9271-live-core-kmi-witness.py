@@ -6,7 +6,7 @@ inside *already loaded* Android stock modules. A loaded module's import is
 corroborating evidence, NOT an authoritative live kernel export CRC.
 Does not insmod, patch, write kernel files, sign, or flash anything.
 """
-import argparse, csv, json, os, shlex, struct, subprocess
+import argparse, csv, hashlib, json, os, shlex, struct, subprocess
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -97,6 +97,46 @@ def scan_as_root(directories,wanted):
                   'root_loaded_name_matches':sum(len(x) for x in found.values())}
 
 
+def select_matching_module(paths, reader=read):
+    """Choose a candidate only if *all* independently found copies are identical.
+
+    Android mounts the same dlkm partition through several paths and one module
+    name can occur in multiple directories/slots. Never assume the first path
+    is the loaded module. Prefer filesystem object identity where available;
+    then confirm SHA256 byte identity before counting the __versions records.
+    """
+    identities=set()
+    unique=[]
+    for p in sorted((Path(x) for x in paths),key=lambda p:str(p)):
+        try:
+            stat=p.stat()  # read-only, follows symlinks and shared bind mounts
+            key=('inode',stat.st_dev,stat.st_ino)
+        except OSError:
+            key=('path',os.path.realpath(str(p)))
+        if key not in identities:
+            identities.add(key)
+            unique.append(p)
+
+    aliases_collapsed=len(paths)-len(unique)
+    if not unique:
+        return None,'missing',aliases_collapsed
+    # Refuse unbounded probing of a corrupt or hostile directory index.
+    if len(unique)>16:
+        return None,'too_many_candidates',aliases_collapsed
+    buffers=[]
+    for p in unique:
+        raw=reader(p)
+        if not raw:
+            return None,'unreadable',aliases_collapsed
+        if raw[:6]!=b'\x7fELF\x02\x01':
+            return None,'invalid_elf',aliases_collapsed
+        buffers.append(raw)
+    if len({hashlib.sha256(blob).digest() for blob in buffers})!=1:
+        return None,'different_binaries_same_module_name',aliases_collapsed
+    status='identical_duplicate_sources' if len(unique)>1 else 'unique_source'
+    return buffers[0],status,aliases_collapsed
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest',type=Path,required=True)
@@ -138,18 +178,26 @@ def main():
                     prior.add(canonical)
     matched=defaultdict(list);conflicted=defaultdict(list)
     examined=0;ambiguities=[];unreadable=[];missing_files=0
+    identical_multi_source_modules=0
+    collapsed_mount_alias_paths=0
+    invalid_elf_modules=[]
     for module in sorted(wanted):
         paths=found.get(module,[])
         if not paths:
             missing_files+=1
             continue
-        if len(paths)!=1:
-            ambiguities.append(module)
+        raw,status,collapsed=select_matching_module(paths)
+        collapsed_mount_alias_paths+=collapsed
+        if raw is None:
+            if status=='unreadable':
+                unreadable.append(module)
+            elif status=='invalid_elf':
+                invalid_elf_modules.append(module)
+            else:
+                ambiguities.append(module)
             continue
-        raw=read(paths[0])
-        if not raw:
-            unreadable.append(module)
-            continue
+        if status=='identical_duplicate_sources':
+            identical_multi_source_modules+=1
         examined+=1
         for symbol,value in imports(raw).items():
             if symbol not in crc:continue
@@ -201,6 +249,9 @@ def main():
         'root_module_path_enumeration':root_scan_info,
         'module_files_not_found':missing_files,
         'ambiguous_module_names':ambiguities,'unreadable_module_names':unreadable,
+        'invalid_elf_module_names':invalid_elf_modules,
+        'identical_multi_source_modules':identical_multi_source_modules,
+        'collapsed_mount_alias_paths':collapsed_mount_alias_paths,
         'module_signature_enforcement':signature,
         'core_export_name_visibility':core_export_names,
         'limitations':('Working stock module imports corroborate candidate CRCs but '
@@ -214,9 +265,17 @@ def main():
     print('Kernel:',kernel,'loaded ELF module files read:',examined)
     print('Module path discovery: unprivileged matches:',user_scan_matches,
           '| rooted find:',root_scan_info)
+    print('Module candidate resolution: identical copies:',identical_multi_source_modules,
+          '| aliased paths collapsed:',collapsed_mount_alias_paths)
+    print('Unreadable:',len(unreadable),'| differing/ambiguous:',len(ambiguities),
+          '| invalid ELF:',len(invalid_elf_modules),'| path missing:',missing_files)
+    if ambiguities:
+        print('Ambiguous module names (sample):',', '.join(ambiguities[:15]))
+    if unreadable:
+        print('Unreadable module names (sample):',', '.join(unreadable[:15]))
     if mode=='normal_boot' and not examined:
-        print('INCOMPLETE: no loaded module ELF files read; this is a path/permission'
-              ' discovery failure, NOT 101 CRC incompatibilities.')
+        print('INCOMPLETE: candidate paths found, but no unambiguous, readable ELF'
+              ' files could be selected. This is NOT 101 CRC incompatibilities.')
         print('Check stock module mount paths and privileges; no module was loaded.')
     print(f'{len(matched)}/101 symbol matches; {len(conflicted)} conflicts; '
           f'{len(remaining)} without loaded-module witnesses')
