@@ -6,7 +6,7 @@ inside *already loaded* Android stock modules. A loaded module's import is
 corroborating evidence, NOT an authoritative live kernel export CRC.
 Does not insmod, patch, write kernel files, sign, or flash anything.
 """
-import argparse, csv, json, os, shlex, struct, subprocess
+import argparse, csv, hashlib, json, os, shlex, struct, subprocess
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -97,6 +97,81 @@ def scan_as_root(directories,wanted):
                   'root_loaded_name_matches':sum(len(x) for x in found.values())}
 
 
+
+def elf_gnu_build_id_note(raw):
+    """Get the raw .note.gnu.build-id section for comparison with sysfs.
+
+    Raw note bytes (rather than an ELF pointer or kernel address) can be
+    compared directly with /sys/module/<name>/notes/.note.gnu.build-id.
+    Return None if metadata is missing or malformed. Read-only.
+    """
+    if not raw or len(raw)<64 or raw[:6]!=b'\x7fELF\x02\x01':
+        return None
+    try:
+        off=struct.unpack_from('<Q',raw,40)[0]
+        size,count,names_id=struct.unpack_from('<HHH',raw,58)
+        if size!=64 or not count or names_id>=count or off+count*size>len(raw):
+            return None
+        hdrs=[struct.unpack_from('<IIQQQQIIQQ',raw,off+i*size)
+              for i in range(count)]
+        names_hdr=hdrs[names_id]
+        begin=names_hdr[4]
+        if begin+names_hdr[5]>len(raw):
+            return None
+        names=raw[begin:begin+names_hdr[5]]
+        for hdr in hdrs:
+            if hdr[0]>=len(names):
+                continue
+            if names[hdr[0]:].split(b'\0',1)[0]!=b'.note.gnu.build-id':
+                continue
+            begin=hdr[4]
+            if begin+hdr[5]>len(raw):
+                return None
+            note=raw[begin:begin+hdr[5]]
+            return note or None
+    except (ValueError,struct.error,IndexError):
+        return None
+    return None
+
+
+def resolve_candidate(module, paths, mode):
+    """Choose a stock ELF only when evidence identifies the same binary.
+
+    Repeated mount paths are common on Android. If candidate bytes match
+    SHA256, they're one physical ABI witness regardless of mount aliases.
+    When bytes differ, select only a unique matching live GNU Build-ID.
+    Never pick the first arbitrary .ko with the same filename.
+    """
+    groups={}
+    unreadable=0
+    for path in paths:
+        raw=read(path)
+        if not raw:
+            unreadable+=1
+            continue
+        digest=hashlib.sha256(raw).hexdigest()
+        if digest not in groups:
+            groups[digest]=raw
+    if not groups:
+        return None,'unreadable',len(groups),unreadable
+    live_note=(read('/sys/module/'+module+'/notes/.note.gnu.build-id')
+               if mode=='normal_boot' else None)
+    if live_note:
+        matches=[raw for raw in groups.values()
+                 if elf_gnu_build_id_note(raw)==live_note]
+        if len(matches)==1:
+            reason=('build_id_verified_unique' if len(groups)>1
+                    else 'build_id_verified')
+            return matches[0],reason,len(groups),unreadable
+        if len(matches)==0:
+            return None,'live_build_id_not_matched',len(groups),unreadable
+        return None,'multiple_build_id_matches',len(groups),unreadable
+    if len(groups)==1:
+        reason='identical_copies' if len(paths)>1 else 'single_candidate'
+        return next(iter(groups.values())),reason,len(groups),unreadable
+    return None,'different_content_candidates',len(groups),unreadable
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest',type=Path,required=True)
@@ -138,18 +213,27 @@ def main():
                     prior.add(canonical)
     matched=defaultdict(list);conflicted=defaultdict(list)
     examined=0;ambiguities=[];unreadable=[];missing_files=0
+    duplicate_groups_resolved=0;build_ids_verified=0
+    selection_reasons=defaultdict(int)
     for module in sorted(wanted):
         paths=found.get(module,[])
         if not paths:
             missing_files+=1
+            selection_reasons['no_module_file_found']+=1
             continue
-        if len(paths)!=1:
-            ambiguities.append(module)
+        raw,reason,unique_contents,unreadable_paths=resolve_candidate(
+            module,paths,mode)
+        selection_reasons[reason]+=1
+        if raw is None:
+            if reason=='unreadable':
+                unreadable.append(module)
+            else:
+                ambiguities.append(module)
             continue
-        raw=read(paths[0])
-        if not raw:
-            unreadable.append(module)
-            continue
+        if reason=='identical_copies':
+            duplicate_groups_resolved+=1
+        if reason.startswith('build_id_verified'):
+            build_ids_verified+=1
         examined+=1
         for symbol,value in imports(raw).items():
             if symbol not in crc:continue
@@ -199,6 +283,9 @@ def main():
         'loaded_module_names':len(wanted),'module_ELFs_read':examined,
         'unprivileged_module_path_matches':user_scan_matches,
         'root_module_path_enumeration':root_scan_info,
+        'module_selection_reasons':dict(sorted(selection_reasons.items())),
+        'identical_duplicate_groups_resolved':duplicate_groups_resolved,
+        'matching_live_build_ids_verified':build_ids_verified,
         'module_files_not_found':missing_files,
         'ambiguous_module_names':ambiguities,'unreadable_module_names':unreadable,
         'module_signature_enforcement':signature,
@@ -214,10 +301,13 @@ def main():
     print('Kernel:',kernel,'loaded ELF module files read:',examined)
     print('Module path discovery: unprivileged matches:',user_scan_matches,
           '| rooted find:',root_scan_info)
+    print('Module selection:',dict(sorted(selection_reasons.items())),
+          '| duplicate groups resolved:',duplicate_groups_resolved,
+          '| matched live Build-IDs:',build_ids_verified)
     if mode=='normal_boot' and not examined:
-        print('INCOMPLETE: no loaded module ELF files read; this is a path/permission'
-              ' discovery failure, NOT 101 CRC incompatibilities.')
-        print('Check stock module mount paths and privileges; no module was loaded.')
+        print('INCOMPLETE: no loaded module ELF files could be selected or read;'
+              ' examine module selection reasons, NOT 101 CRC incompatibilities.')
+        print('No module was loaded.')
     print(f'{len(matched)}/101 symbol matches; {len(conflicted)} conflicts; '
           f'{len(remaining)} without loaded-module witnesses')
     if remaining: print('Unwitnessed:',', '.join(remaining))
