@@ -40,11 +40,11 @@ pkg install python gh -y
 mkdir -p "$HOME/nevada-live-kmi"
 
 gh api -H "Accept: application/vnd.github.raw+json" \
-  repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-ar9271-live-core-kmi-witness.py \
+  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-ar9271-live-core-kmi-witness.py?ref=nevada-ar9271-live-core-kmi-witness" \
   > "$HOME/nevada-live-kmi/witness.py"
 
 gh api -H "Accept: application/vnd.github.raw+json" \
-  repos/BalsacTheJew666/Action-TWRP-Builder/contents/ci/nevada-ar9271-core-kmi.tsv \
+  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/ci/nevada-ar9271-core-kmi.tsv?ref=nevada-ar9271-live-core-kmi-witness" \
   > "$HOME/nevada-live-kmi/core-kmi.tsv"
 
 python "$HOME/nevada-live-kmi/witness.py" \
