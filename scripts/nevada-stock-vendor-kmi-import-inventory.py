@@ -12,6 +12,7 @@ signs, changes SELinux or modifies device partitions. It reads .ko and a
 downloaded public symbol table only. All output is local metadata.
 """
 import argparse
+import hashlib
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import importlib.util
@@ -28,6 +29,7 @@ DIRS=(
 )
 GKI_BUILD="14563692"
 GKI_REQUIRED_EXPORT_COUNT=8471
+GKI_VERIFIED_SHA256="bdcf93a69e5513ffefd916f9b9cceaf4c1f14657e3aeaf52bb0cd0cd5ea655c0"
 
 def load_witness():
     path=Path(__file__).with_name("nevada-ar9271-live-core-kmi-witness.py")
@@ -39,6 +41,8 @@ def load_witness():
     return m
 
 def official_core_exports(path,verify_count=True):
+    if verify_count and hashlib.sha256(path.read_bytes()).hexdigest()!=GKI_VERIFIED_SHA256:
+        raise ValueError("Exact official GKI 14563692 vmlinux.symvers SHA256 mismatch")
     result={}
     for i,line in enumerate(path.read_text().splitlines(),1):
         p=line.split()
@@ -187,8 +191,13 @@ def main():
             "Do not load AR9271, flash a custom kernel, change SELinux or bypass module signature/CFI."
         ]
     })
+    # Respect device privacy even if a previous JSON report had loose permissions.
+    os.umask(0o077)
     args.output.parent.mkdir(parents=True,exist_ok=True)
-    args.output.write_text(json.dumps(result,indent=2)+"\n")
+    fd=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    with os.fdopen(fd,"w",encoding="utf-8") as stream:
+        stream.write(json.dumps(result,indent=2)+"\n")
+    os.chmod(args.output,0o600)
     print("XT2615-1 NORMAL-BOOT STOCK IMPORT INVENTORY — RESEARCH ONLY")
     print("Mode:",mode,"Kernel:",os.uname().release)
     print("Official public GKI exports:",len(official))
