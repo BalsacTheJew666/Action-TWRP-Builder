@@ -1,0 +1,32 @@
+{
+  "source": "Offline read-only recovered TWRP recovery vendor_boot_a.img module __versions parsing, corroborated against actual four PR #15 AR9271 module imports and experimental vmlinux.symvers; NOT the live boot kernel",
+  "run": "40413637325",
+  "artifact_id": 12697280059,
+  "unique_core_symbols": 101,
+  "core_import_instances": 136,
+  "recovered_elf_modules": 212,
+  "recovery_module_witnessed": 83,
+  "recovery_module_crc_conflicts": 0,
+  "recovery_module_import_witness_records": 2759,
+  "not_witnessed": [
+    "device_release_driver",
+    "rfkill_pause_polling",
+    "usb_alloc_urb",
+    "usb_anchor_urb",
+    "usb_bulk_msg",
+    "usb_control_msg",
+    "usb_deregister",
+    "usb_find_common_endpoints",
+    "usb_free_urb",
+    "usb_get_dev",
+    "usb_get_urb",
+    "usb_interrupt_msg",
+    "usb_kill_anchored_urbs",
+    "usb_kill_urb",
+    "usb_put_dev",
+    "usb_register_driver",
+    "usb_submit_urb",
+    "usb_unanchor_urb"
+  ],
+  "warning": "These are recovery module __versions import requirements, NOT actual live vmlinux exports. The on-device normal-boot audit is still required. CRCs are necessary but do not validate module signing, KMI whitelist, CFI, vermagic, OTG or firmware."
+}
