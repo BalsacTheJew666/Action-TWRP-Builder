@@ -7,6 +7,7 @@ on:
       - '.github/workflows/XT2615-Nevada-GKI-14563692-Core-ABI.yml'
       - 'scripts/nevada-ar9271-official-gki-core-crc.py'
       - 'NEVADA-GKI-14563692-CORE-ABI.md'
+      - 'scripts/nevada-ar9271-live-loader-audit.sh'
   workflow_dispatch:
 
 permissions:
@@ -46,6 +47,8 @@ jobs:
             "$SOURCE_GKI_TAG" "$SOURCE_SHA" "$SOURCE_GKI_CI_BUILD" |
               tee "$RUNNER_TEMP/verified/PROVENANCE.txt"
           python3 -m py_compile scripts/nevada-ar9271-official-gki-core-crc.py
+          sh -n scripts/nevada-ar9271-live-loader-audit.sh
+          echo 'PASS: on-device audit script shell syntax; execution reserved for user-controlled phone'
 
       - name: Retrieve prior successful AR9271 diagnostic artifact
         id: modules
