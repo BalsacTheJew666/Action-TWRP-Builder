@@ -61,6 +61,42 @@ def scan(directories,wanted):
                         found[module].append(Path(base,filename))
     return found
 
+def scan_as_root(directories,wanted):
+    """Enumerate ONLY .ko paths in known system module dirs using KernelSU.
+
+    Ordinary Termux often cannot traverse vendor_dlkm directories, so an
+    unprivileged os.walk() can silently return zero files. The optional root
+    shell executes only read-only 'find', with shell-quoted fixed directories;
+    its output is file paths, never module bytes or kernel addresses.
+    """
+    found=defaultdict(list)
+    quoted=' '.join(shlex.quote(str(d)) for d in directories)
+    command=(
+        'for d in '+quoted+'; do '
+        '[ -d "$d" ] || continue; '
+        '(find -L "$d" -type f -name "*.ko" -print 2>/dev/null || '
+        'find "$d" -type f -name "*.ko" -print 2>/dev/null); '
+        'done'
+    )
+    try:
+        result=subprocess.run(
+            ['su','-c',command],capture_output=True,timeout=90,check=False
+        )
+    except (OSError,subprocess.TimeoutExpired) as e:
+        return found,{'status':type(e).__name__,'root_paths_listed':0}
+    # The script itself never executes paths from find as shell commands.
+    paths=[x for x in result.stdout.decode('utf-8','replace').splitlines()
+           if x.endswith('.ko') and x.startswith('/')]
+    for p in paths:
+        filename=Path(p).name
+        module=filename[:-3].replace('-','_')
+        if module in wanted:
+            found[module].append(Path(p))
+    status='ok' if result.returncode==0 else 'nonzero_exit'
+    return found,{'status':status,'root_paths_listed':len(paths),
+                  'root_loaded_name_matches':sum(len(x) for x in found.values())}
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest',type=Path,required=True)
@@ -86,6 +122,20 @@ def main():
         directories=STOCK_DIRS
         mode='normal_boot';kernel=os.uname().release
     found=scan(directories,wanted)
+    user_scan_matches=sum(len(v) for v in found.values())
+    root_scan_info={'status':'not_needed_offline','root_paths_listed':0,
+                    'root_loaded_name_matches':0}
+    if mode=='normal_boot':
+        from_root,root_scan_info=scan_as_root(directories,wanted)
+        for name,paths in from_root.items():
+            # The same stock module can be visible through bind mounts,
+            # symlinks or both scans; deduplicate canonical paths first.
+            prior={os.path.realpath(str(p)) for p in found[name]}
+            for p in paths:
+                canonical=os.path.realpath(str(p))
+                if canonical not in prior:
+                    found[name].append(p)
+                    prior.add(canonical)
     matched=defaultdict(list);conflicted=defaultdict(list)
     examined=0;ambiguities=[];unreadable=[];missing_files=0
     for module in sorted(wanted):
@@ -147,6 +197,8 @@ def main():
         'no_witness_symbols':remaining,
         'conflicts':dict(conflicted),'witnesses':dict(matched),
         'loaded_module_names':len(wanted),'module_ELFs_read':examined,
+        'unprivileged_module_path_matches':user_scan_matches,
+        'root_module_path_enumeration':root_scan_info,
         'module_files_not_found':missing_files,
         'ambiguous_module_names':ambiguities,'unreadable_module_names':unreadable,
         'module_signature_enforcement':signature,
@@ -160,6 +212,12 @@ def main():
     args.output.write_text(json.dumps(report,indent=2)+'\n')
     print('MOTO XT2615-1 READ-ONLY CORE ABI WITNESS | NOT INSTALLABLE')
     print('Kernel:',kernel,'loaded ELF module files read:',examined)
+    print('Module path discovery: unprivileged matches:',user_scan_matches,
+          '| rooted find:',root_scan_info)
+    if mode=='normal_boot' and not examined:
+        print('INCOMPLETE: no loaded module ELF files read; this is a path/permission'
+              ' discovery failure, NOT 101 CRC incompatibilities.')
+        print('Check stock module mount paths and privileges; no module was loaded.')
     print(f'{len(matched)}/101 symbol matches; {len(conflicted)} conflicts; '
           f'{len(remaining)} without loaded-module witnesses')
     if remaining: print('Unwitnessed:',', '.join(remaining))

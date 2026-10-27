@@ -56,3 +56,36 @@ with tempfile.TemporaryDirectory(prefix="nevada-witness-selftest-") as temp:
         "kallsyms_exports_visible":False
     },data["core_export_name_visibility"]
     print("PASS: end-to-end report creation, runtime field initialization and import CRC classification")
+
+    # Unit-test root-only *path enumeration* without ever invoking su or
+    # scanning the runner's real filesystem. Termux has a mount namespace in
+    # which os.walk can return no paths, so a root find fallback is needed.
+    import importlib.util
+    from unittest import mock
+    spec=importlib.util.spec_from_file_location("nevada_witness",WITNESS)
+    witness=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(witness)
+    with mock.patch.object(witness.subprocess,"run") as execute:
+        execute.return_value=subprocess.CompletedProcess(
+            args=["su","-c","find"],returncode=0,
+            stdout=(str(modules/"example.ko")+"\n").encode(),stderr=b""
+        )
+        files,root_status=witness.scan_as_root(
+            ["/vendor_dlkm/lib/modules"],{"example"}
+        )
+        assert files["example"]==[modules/"example.ko"],files
+        assert root_status["status"]=="ok"
+        assert root_status["root_loaded_name_matches"]==1
+        assert execute.call_args.args[0][:2]==["su","-c"]
+        shell=execute.call_args.args[0][2]
+        assert "find" in shell and "insmod" not in shell
+        print("PASS: mock rooted read-only path scan discovers inaccessible stock module")
+
+    with mock.patch.object(witness.subprocess,"run") as execute:
+        execute.side_effect=FileNotFoundError("su unavailable")
+        files,root_status=witness.scan_as_root(
+            ["/vendor_dlkm/lib/modules"],{"example"}
+        )
+        assert not files and root_status["status"]=="FileNotFoundError"
+        print("PASS: missing root access is labeled as unavailable, not a CRC mismatch")
+

@@ -67,3 +67,31 @@ If the 18 remaining symbols still lack corroboration after a normal-boot scan, p
 ## CI scope
 
 GitHub Actions checks Python syntax, a pinned 101-symbol candidate manifest, saved recovery witness summary and synthetic ELF fixture parsing. A green CI result **does not mean the normal-boot device is compatible**. The actual device audit is run by the user in Termux.
+
+
+## Android 16 Termux module discovery fix (Oct 27, 2026)
+
+An actual Motorola XT2615-1 run completed with \`loaded ELF module files read: 0\`, \`0/101\` corroborated symbols and **zero conflicts**. This is a failed evidence-collection attempt, not 101 incompatible imports. The original Python code only enumerated module directories using Termux's unprivileged \`os.walk()\`; it could silently skip inaccessible paths even though subsequent file reads could request KernelSU privileges.
+
+The updated script first enumerates ordinarily accessible \`.ko\` paths and then uses an optional **read-only KernelSU \`su -c find\`** over a fixed allowlist of system/vendor module locations. Only already loaded module basenames from \`/proc/modules\` are analyzed. It deduplicates canonical paths so bind mounts and symlinks do not spuriously create duplicate candidates. Actual stock module bytes are read using the existing read-only method. The JSON now stores \`root_module_path_enumeration\` and \`unprivileged_module_path_matches\`, and the console clearly reports when **zero ELF files** were found, without presenting this as a CRC failure.
+
+We added a CI mock-root regression test and kept the existing end-to-end synthetic-ELF report test. This PR changes **no kernel module, image, SELinux policy or boot setting**.
+
+### Updated read-only Termux command
+
+~~~bash
+cd "$HOME/nevada-live-kmi" || exit 1
+
+gh api -H "Accept: application/vnd.github.raw+json" \
+  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-ar9271-live-core-kmi-witness.py?ref=nevada-live-kmi-root-discovery-fix" \
+  > witness.py.new && \
+python -m py_compile witness.py.new && \
+mv witness.py.new witness.py && \
+python witness.py \
+  --manifest core-kmi.tsv \
+  --output live-core-kmi.json
+~~~
+
+If the report still says \`loaded ELF module files read: 0\`, share **only** the \`Module path discovery\` summary. It would suggest a different mounted module location, compressed module storage, or a Termux/root mount-namespace mismatch requiring another **read-only** inspection.
+
+This remains a **corroborating** module-import witness check; it cannot establish on-device core exports, driver loadability, module-signature behavior, CFI, correct \`vermagic\`, USB OTG, firmware or safe installation. The two missing \`rfkill_pause_polling\` and \`usb_get_urb\` exports remain blockers regardless of the witness count.
