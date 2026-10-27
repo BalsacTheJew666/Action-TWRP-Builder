@@ -1,0 +1,55 @@
+name: XT2615-1 Nevada - Private Vendor ABI Import Scanner Selftest
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-Private-Vendor-ABI-Inventory.yml'
+      - 'scripts/nevada-vendor-core-abi-private-inventory.py'
+      - 'ci/nevada-vendor-abi-import-private-e2e.py'
+      - 'scripts/nevada-ar9271-live-core-kmi-witness.py'
+      - 'ci/nevada-ar9271-core-kmi.tsv'
+      - 'NEVADA-PRIVATE-VENDOR-KMI-INVENTORY.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-private-vendor-abi-inventory-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline-no-device-selftest:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    env:
+      OFFICIAL_GKI_URL: https://ci.android.com/builds/submitted/14563692/kernel_aarch64/latest/raw/vmlinux.symvers
+      OFFICIAL_GKI_SHA256: bdcf93a69e5513ffefd916f9b9cceaf4c1f14657e3aeaf52bb0cd0cd5ea655c0
+    steps:
+      - name: Checkout source-only scanner and test
+        uses: actions/checkout@v4
+
+      - name: Verify source syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/nevada-vendor-core-abi-private-inventory.py \
+            scripts/nevada-ar9271-live-core-kmi-witness.py \
+            ci/nevada-vendor-abi-import-private-e2e.py
+
+      - name: Retrieve public GKI 14563692 fixed reference (NOT vendor files)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fLSs --retry 2 --connect-timeout 15 --max-time 90 \
+            "$OFFICIAL_GKI_URL" -o "$RUNNER_TEMP/vmlinux.symvers"
+          echo "$OFFICIAL_GKI_SHA256  $RUNNER_TEMP/vmlinux.symvers" | sha256sum -c -
+
+      - name: Run actual scanner end to end with synthetic test ELF only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/nevada-vendor-abi-import-private-e2e.py "$RUNNER_TEMP/vmlinux.symvers"
+          echo "No device, proprietary modules, kernel images, source overlays, or scanner reports were uploaded."
