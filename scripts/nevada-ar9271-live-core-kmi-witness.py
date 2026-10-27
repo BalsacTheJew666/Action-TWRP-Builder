@@ -106,6 +106,27 @@ def main():
             (matched if value==crc[symbol] else conflicted)[symbol].append({
                 'stock_module':module,'import_crc':f'0x{value:08x}'})
     remaining=sorted(set(crc)-set(matched)-set(conflicted))
+    # The exact official GKI build 14563692 lacks two Atheros imports.
+    # /proc/kallsyms can sometimes expose whether the *running* device
+    # retains these export names; do NOT interpret symbol values as CRCs
+    # or log kernel addresses from this sensitive interface.
+    core_export_names={
+        'rfkill_pause_polling':'unavailable',
+        'usb_get_urb':'unavailable',
+        'kallsyms_exports_visible':False,
+    }
+    if mode=='normal_boot':
+        kallsyms=read('/proc/kallsyms')
+        if kallsyms:
+            names={line.split()[2].decode('ascii','replace') for line
+                   in kallsyms.splitlines() if len(line.split())>=3}
+            visible=any(s.startswith('__ksymtab_') for s in names)
+            core_export_names['kallsyms_exports_visible']=visible
+            for sym in ('rfkill_pause_polling','usb_get_urb'):
+                if visible:
+                    core_export_names[sym]=('export_name_present' if
+                          '__ksymtab_'+sym in names else 'not_seen_in_kallsyms')
+    report['core_export_name_visibility']=core_export_names
     signature=None
     if mode=='normal_boot':
         for path in ('/sys/module/module/parameters/sig_enforce',
@@ -145,6 +166,7 @@ def main():
     if conflicted:print('Conflicts:',json.dumps(dict(conflicted)))
     print('Candidate vermagic:',CANDIDATE_VERMAGIC)
     print('Module signing enforcement:',signature)
+    print('Two GKI-missing export names in live kallsyms:',core_export_names)
     print('Report:',args.output)
 
 if __name__=='__main__':main()
