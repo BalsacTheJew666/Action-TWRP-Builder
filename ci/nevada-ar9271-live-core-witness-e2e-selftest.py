@@ -166,3 +166,16 @@ with tempfile.TemporaryDirectory(prefix="nevada-witness-selftest-") as temp:
             "normal_boot")
         assert selected is None and reason=="live_build_id_not_matched"
         print("PASS: build-ID mismatch rejects both candidates safely")
+
+
+    # A missing/unreadable second path is NOT evidence that both paths
+    # contain the same binary; avoid treating one readable candidate
+    # as authoritative unless a matching live GNU Build-ID was obtained.
+    with mock.patch.object(witness,"read",side_effect=lambda p:
+            original_bytes if str(p)=="/tmp/one/example.ko" else None):
+        raw,reason,uniq,unreadable=witness.resolve_candidate(
+            "example",[Path("/tmp/one/example.ko"),
+                       Path("/tmp/unreadable/example.ko")],"normal_boot")
+        assert raw is None and reason=="unreadable_peer_candidates",(
+            reason,uniq,unreadable)
+    print("PASS: unreadable second candidate is never silently accepted")
