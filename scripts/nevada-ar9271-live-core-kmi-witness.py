@@ -126,7 +126,6 @@ def main():
                 if visible:
                     core_export_names[sym]=('export_name_present' if
                           '__ksymtab_'+sym in names else 'not_seen_in_kallsyms')
-    report['core_export_name_visibility']=core_export_names
     signature=None
     if mode=='normal_boot':
         for path in ('/sys/module/module/parameters/sig_enforce',
@@ -151,6 +150,7 @@ def main():
         'module_files_not_found':missing_files,
         'ambiguous_module_names':ambiguities,'unreadable_module_names':unreadable,
         'module_signature_enforcement':signature,
+        'core_export_name_visibility':core_export_names,
         'limitations':('Working stock module imports corroborate candidate CRCs but '
                        'are not live vmlinux exports. 101/101 would still not prove '
                        'module loader signing, CFI, target vermagic, USB/OTG or firmware '
