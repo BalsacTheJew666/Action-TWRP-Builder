@@ -10,6 +10,19 @@ We independently analyzed the module __versions records from the user's preserve
 
 These are **requirements recorded inside recovered modules**, NOT exports verified against the live kernel. Normal Android boot requires separate verification.
 
+## Additional official GKI test completed before the device audit
+
+PR #16, GitHub Actions run **#40437647125**, fetched the authoritative Google GKI build **14563692** symbol CRC export table for release `android13-5.15-2025-05_r14` (matching running base source commit `9b2308ac0ad616788fb57ba688aa07f0ff221355`). It compared all **233 actual imports** from corrected PR #15 Atheros modules and found:
+
+- **30** matches with the saved stock Wi-Fi exports
+- **67** matches with experimental Atheros helper modules
+- **134 of 136 core import instances** matching official GKI export CRCs
+- **2 required core symbols not exported by the official GKI reference:** `rfkill_pause_polling` and `usb_get_urb`
+
+These two missing exports, not the earlier 18 missing *recovery witnesses*, are now the highest-priority actual upstream reference gaps. The official GKI table is not a direct readout of the Motorola's live, possibly customized kernel.
+
+The on-device read-only tool now also checks whether the kernel's `/proc/kallsyms` lists export names `__ksymtab_rfkill_pause_polling` and `__ksymtab_usb_get_urb`, **without saving their addresses**. A missing kallsyms entry is inconclusive when kallsyms exports are hidden; neither a listed symbol name nor a CRC witness alone authorizes module loading.
+
 ## Read-only normal-boot audit
 
 This PR supplies scripts/nevada-ar9271-live-core-kmi-witness.py plus ci/nevada-ar9271-core-kmi.tsv containing 101 candidate CRC requirements extracted from the actual corrected PR #15 module artifact.
