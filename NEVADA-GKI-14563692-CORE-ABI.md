@@ -43,3 +43,42 @@ A match for each of the 136 previously experimental-core imports against the aut
 To finish, we will need a **read-only on-device report** of running GKI build identity, module security policies, `vermagic`/CFI settings, and existing stock module identity. Do not force `insmod`, alter CRC or `vermagic`, replace stock wireless modules, change the kernel or flash anything yet.
 
 The GitHub Actions workflow is research-only, running in cloud CI. Current KernelSU, TWRP/OrangeFox, PBRP/SHRP and internal MediaTek Wi-Fi remain untouched.
+
+## Results from first verified official CI run #40437029677
+
+The workflow successfully downloaded the official `vmlinux.symvers` containing **8,471** exported core symbols and inspected all **233** imported symbols in the four diagnostic Atheros modules.
+
+| Import class | Count |
+| --- | ---: |
+| Stock Wi-Fi CRC reference matches | 30 |
+| Experimental Atheros companion import matches | 67 |
+| Exact official GKI 14563692 core CRC matches | **134** |
+| Symbols **not exported in official GKI 14563692** | **2** |
+| Total | **233** |
+
+The two missing official core exports are:
+
+- `rfkill_pause_polling`, experimental module import CRC `0x3939f8f0`.
+- `usb_get_urb`, experimental module import CRC `0x3c85197c`.
+
+They appear in `ath9k_htc.ko`'s `__versions` records but are **not listed as exports** in the official GKI release build's symvers. This could reflect kernel ABI symbol trimming / an original vendor module symbol allowlist, but **that explanation is not proven**. We must not assume the running kernel exports either one without inspecting the phone.
+
+A subsequent read-only script, `scripts/nevada-ar9271-live-loader-audit.sh`, records kernel identity, loader restrictions, stock Wi-Fi Build-ID note digests, and **names only** from root-readable kallsyms (no memory addresses). It is intentionally unable to determine the true exported CRC values or certify loader success.
+
+### User-controlled, read-only device collection from Termux
+
+```sh
+curl -fL \
+  https://raw.githubusercontent.com/BalsacTheJew666/Action-TWRP-Builder/nevada-ar9271-official-gki-14563692-core-kmi/scripts/nevada-ar9271-live-loader-audit.sh \
+  -o "$HOME/nevada-ar9271-live-loader-audit.sh"
+
+sh -n "$HOME/nevada-ar9271-live-loader-audit.sh" &&
+  su -c "sh $HOME/nevada-ar9271-live-loader-audit.sh" |
+  tee "$HOME/nevada-ar9271-live-loader-report.txt"
+```
+
+This command downloads the script into **Termux home** and creates only a **text log in Termux home**; the root script itself does not write to kernel sysfs, flash, or installed modules. It does not call `insmod`, `modprobe`, `setenforce`, or any kernel modification command. Review the script before running it if desired.
+
+Please share the output lines beginning with `symbol=` plus the module loader policy and kernel release sections. Do not include unrelated private device logs.
+
+Even if `__ksymtab_*` symbol names are visible, that establishes **potential module export presence**, not the correct modversion CRC, loader permissions, module signature or safe kernel compatibility. Missing names may simply mean `/proc/kallsyms` visibility is restricted. Do not attempt to install any experimental Atheros driver yet.
