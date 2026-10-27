@@ -167,6 +167,11 @@ def resolve_candidate(module, paths, mode):
             return None,'live_build_id_not_matched',len(groups),unreadable
         return None,'multiple_build_id_matches',len(groups),unreadable
     if len(groups)==1:
+        # An unreadable alternative could be DIFFERENT; don't silently assume
+        # it has the same ABI. A matching live Build-ID would have selected
+        # the readable candidate in the preceding block.
+        if unreadable:
+            return None,'unreadable_peer_candidates',len(groups),unreadable
         reason='identical_copies' if len(paths)>1 else 'single_candidate'
         return next(iter(groups.values())),reason,len(groups),unreadable
     return None,'different_content_candidates',len(groups),unreadable
