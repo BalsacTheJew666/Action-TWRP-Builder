@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/nevada-ar9271-live-core-kmi-witness.py'
+      - 'ci/nevada-ar9271-live-core-witness-e2e-selftest.py'
       - 'ci/nevada-ar9271-core-kmi.tsv'
       - 'ci/nevada-recovery-core-kmi-evidence.json'
       - '.github/workflows/XT2615-Nevada-Live-Core-KMI-Audit.yml'
@@ -64,6 +65,11 @@ jobs:
           assert m.imports(b'invalid')=={}
           print('PASS: safe parser reads imported Linux 5.15 ELF CRC records')
           PY
+      - name: Run full end-to-end synthetic-ELF witness audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/nevada-ar9271-live-core-witness-e2e-selftest.py
       - name: Confirm no image/module installation is attempted
         run: |
           echo "CI validates a read-only script and saved public CRC metadata only."
