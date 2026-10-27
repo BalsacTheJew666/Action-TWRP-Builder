@@ -1,0 +1,42 @@
+name: XT2615-1 Nevada - Private Live Ksymtab Owner Witness Selftest
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-Private-Ksymtab-Owner-Witness.yml'
+      - 'scripts/nevada-vendor-live-ksymtab-owner-witness.py'
+      - 'ci/nevada-vendor-live-ksymtab-owner-selftest.py'
+      - 'NEVADA-PRIVATE-LIVE-EXPORT-OWNER-WITNESS.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-synthetic-kallsyms-owner-check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public research-only source
+        uses: actions/checkout@v4
+
+      - name: Validate parser syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/nevada-vendor-live-ksymtab-owner-witness.py \
+            ci/nevada-vendor-live-ksymtab-owner-selftest.py
+
+      - name: Verify complete owner parser with synthetic kallsyms and module list only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/nevada-vendor-live-ksymtab-owner-selftest.py
+
+      - name: Safety scope confirmation
+        run: |
+          echo 'Only synthetic fixture runs in CI; no real device kallsyms, module or vendor metadata'
+          echo 'The user-run helper is read-only and keeps aggregate/name-level JSON locally'
+          echo 'No insmod, loader bypass, flash, kernel build or root-state changes'
