@@ -1,0 +1,330 @@
+name: XT2615 Nevada KMI 16GB public build - private release
+
+# Public workflow, but all device inputs, build logs, and outputs stay in
+# BalsacTheJew666/nevada-nethunter-baseline-xt2615.
+# Manual/default-branch only; no public artifacts or source checkout from this repo.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-kmi-public-private
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    if: github.repository == 'BalsacTheJew666/Action-TWRP-Builder' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    env:
+      PRIVATE_REPO: BalsacTheJew666/nevada-nethunter-baseline-xt2615
+      PRIVATE_REF: f0312508f9ab13deb0271ed8173dce3df21b4427
+      PRIVATE_TARGET: nevada-kmi-stock-abi-v2
+      SRC_BRANCH: android-16-release-w1wn36.18-114
+      SRC_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+      CLANG_SHA: 56fc36f789871f93ae5c6c038c76e5bf10b5d9a6
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Check 16GiB public runner and isolated private access
+        shell: bash
+        env:
+          PRIV_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/nevada-private" "$GITHUB_WORKSPACE/reports"
+          mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          if (( mem_kb < 14680064 )); then
+            echo "::error::Refusing non-16GiB GitHub runner"
+            exit 1
+          fi
+          if [[ -z "$PRIV_TOKEN" ]]; then
+            echo "::error::Missing separate NEVADA_KERNEL_PRIVATE_TOKEN public-repo Actions secret"
+            exit 1
+          fi
+          status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 \
+            -H "Authorization: Bearer $PRIV_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$PRIVATE_REPO")
+          if [[ "$status" != 200 ]]; then
+            echo "::error::No private kernel repository access (HTTP $status)"
+            exit 1
+          fi
+          echo "16GiB public runner and private repository authentication verified."
+          echo "Sensitive content is not printed or uploaded publicly."
+
+      - name: Download three pinned CI inputs from private kernel repository
+        shell: bash
+        env:
+          PRIV_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$RUNNER_TEMP/nevada-private"
+          for spec in \
+            "configs/nevada-stock.config.gz stock.config.gz" \
+            "ci/kmi/nevada-kmi-supplement.txt nevada-kmi-supplement.txt" \
+            "ci/kmi/nevada-kmi-required-crcs.json nevada-kmi-required-crcs.json"
+          do
+            read -r source dest <<< "$spec"
+            curl -fLsS --retry 2 --connect-timeout 20 --max-time 120 \
+              -H "Authorization: Bearer $PRIV_TOKEN" \
+              -H "Accept: application/vnd.github.raw+json" \
+              "https://api.github.com/repos/$PRIVATE_REPO/contents/$source?ref=$PRIVATE_REF" \
+              -o "$dir/$dest"
+          done
+          test "$(git hash-object "$dir/stock.config.gz")" = "21996d53d1dc7ee0c7f4e037b8fdb3276108db83"
+          printf '%s  %s\n' \
+            8b0141449ef2151701383dfcbb27bcb9fa4b0524bd9bf503dcff996794d4147a "$dir/nevada-kmi-supplement.txt" \
+            292f4a8aa9c2bd51b3d0734e260539a0640c628e217fb6f99d2b4d260d0621fa "$dir/nevada-kmi-required-crcs.json" \
+            | sha256sum -c --status
+          gzip -t "$dir/stock.config.gz"
+          echo "Private firmware config and 250-symbol CRC inputs verified."
+
+      - name: Reclaim VM disk and configure optional swap
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk \
+            /opt/ghc /usr/local/share/powershell /usr/share/swift \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean
+          kb=$(df -Pk "$GITHUB_WORKSPACE" | awk 'END{print $4}')
+          if (( kb >= 25000000 )); then
+            swapgb=8
+          elif (( kb >= 17000000 )); then
+            swapgb=4
+          else
+            swapgb=0
+          fi
+          if (( swapgb > 0 )); then
+            if sudo fallocate -l "$swapgb"G /mnt/nevada-kmi-extra.swap &&
+               sudo chmod 600 /mnt/nevada-kmi-extra.swap &&
+               sudo mkswap /mnt/nevada-kmi-extra.swap >/dev/null &&
+               sudo swapon /mnt/nevada-kmi-extra.swap; then
+              echo "Added $swapgb GiB swap on ephemeral public runner"
+            else
+              sudo swapoff /mnt/nevada-kmi-extra.swap 2>/dev/null || true
+              sudo rm -f /mnt/nevada-kmi-extra.swap
+              echo "Optional swap unavailable"
+            fi
+          fi
+          free -h
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Install minimal kernel compile dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq > "$RUNNER_TEMP/nevada-private/apt.log" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            make git curl bc bison flex gcc-aarch64-linux-gnu \
+            libssl-dev libelf-dev libncurses-dev dwarves cpio rsync \
+            python3 xz-utils zstd file \
+            >> "$RUNNER_TEMP/nevada-private/apt.log" 2>&1
+          echo "Kernel dependencies installed."
+
+      - name: Fetch and verify Android Clang 14.0.7 and LLD 14
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/android-llvm"
+          mkdir -p "$dir"
+          git -C "$dir" init -q
+          git -C "$dir" remote add origin \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          git -C "$dir" -c protocol.version=2 fetch --depth=1 \
+            --filter=blob:none origin "$CLANG_SHA" \
+            > "$RUNNER_TEMP/nevada-private/clang-fetch.log" 2>&1
+          git -C "$dir" sparse-checkout init --cone
+          git -C "$dir" sparse-checkout set clang-r450784e
+          git -C "$dir" checkout --detach FETCH_HEAD \
+            >> "$RUNNER_TEMP/nevada-private/clang-fetch.log" 2>&1
+          test "$(git -C "$dir" rev-parse HEAD)" = "$CLANG_SHA"
+          bin="$dir/clang-r450784e/bin"
+          "$bin/clang" --version > "$RUNNER_TEMP/nevada-private/clang-version.txt"
+          "$bin/ld.lld" --version > "$RUNNER_TEMP/nevada-private/lld-version.txt"
+          grep -Fq 'clang version 14.0.7' "$RUNNER_TEMP/nevada-private/clang-version.txt"
+          grep -Fq 'based on r450784e' "$RUNNER_TEMP/nevada-private/clang-version.txt"
+          grep -Eq '^LLD 14\.' "$RUNNER_TEMP/nevada-private/lld-version.txt"
+          echo "$bin" >> "$GITHUB_PATH"
+          echo "Android Clang 14.0.7 and LLD 14 validated."
+
+      - name: Fetch firmware-matched pinned Motorola kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --filter=blob:none --single-branch \
+            --branch "$SRC_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git kernel-5.15 \
+            > "$RUNNER_TEMP/nevada-private/source-clone.log" 2>&1
+          test "$(git -C kernel-5.15 rev-parse HEAD)" = "$SRC_SHA"
+          test -f kernel-5.15/android/abi_gki_aarch64_mtk
+          echo "Pinned Motorola source verified."
+
+      - name: Verify 2901-symbol list and reproduce stock Full LTO config
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$RUNNER_TEMP/nevada-private"
+          mkdir -p out
+          gzip -dc "$dir/stock.config.gz" > out/.config
+          grep -qx 'CONFIG_MODULES=y' out/.config
+          grep -qx 'CONFIG_MODVERSIONS=y' out/.config
+          grep -qx 'CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
+          python3 - <<'PY'
+          from pathlib import Path
+          import configparser, hashlib, json, os, re
+          private=Path(os.environ['RUNNER_TEMP'])/'nevada-private'
+          source=Path('kernel-5.15/android/abi_gki_aarch64_mtk')
+          cfg=configparser.ConfigParser(allow_no_value=True,strict=False)
+          cfg.optionxform=str
+          cfg.read(source)
+          base=set()
+          for section in cfg.sections():
+              if section.endswith(('whitelist','symbol_list')):
+                  base.update(cfg[section].keys())
+          sup=private.joinpath('nevada-kmi-supplement.txt').read_text().splitlines()
+          required=json.loads(private.joinpath('nevada-kmi-required-crcs.json').read_text())
+          if not (len(base)==2651 and len(sup)==250 and len(set(sup))==250
+                  and not base.intersection(sup)
+                  and set(required)==set(sup)
+                  and all(re.fullmatch(r'0x[0-9a-fA-F]{8}',v) for v in required.values())):
+              raise SystemExit('Invalid private KMI input consistency')
+          combined=sorted(base|set(sup))
+          if len(combined)!=2901:
+              raise SystemExit('Wrong combined symbol list count')
+          output=Path('out/abi_symbollist.raw')
+          output.write_text('\n'.join(combined)+'\n')
+          if hashlib.sha256(output.read_bytes()).hexdigest()!=('b3d62b77bc996bca0d5fe30c3ca68653ada1d6b2d5e48af8a3bc0b4c8a2481ed'):
+              raise SystemExit('Candidate whitelist checksum mismatch')
+          print('2901 candidate KMI names checked without showing private contents.')
+          PY
+          kernel-5.15/scripts/config --file out/.config \
+            --enable TRIM_UNUSED_KSYMS \
+            --set-str UNUSED_KSYMS_WHITELIST "$GITHUB_WORKSPACE/out/abi_symbollist.raw" \
+            --disable LTO_CLANG_THIN --enable LTO_CLANG_FULL
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
+            > "$dir/configure.log" 2>&1
+          grep -qx 'CONFIG_CLANG_VERSION=140007' out/.config
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
+          grep -qx '# CONFIG_LTO_CLANG_THIN is not set' out/.config
+          grep -qx 'CONFIG_MODVERSIONS=y' out/.config
+          grep -qx 'CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
+          echo 'Stock compiler version, full LTO and module versioning validated.'
+
+      - name: Compile experimental Image.gz on 16GiB runner
+        shell: bash
+        timeout-minutes: 150
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/nevada-private"
+          (while sleep 60; do
+             { date -u; free -h; df -h "$GITHUB_WORKSPACE";
+               cat /sys/fs/cgroup/memory.events 2>/dev/null || true; } \
+               >> "$dir/resources.log" 2>&1
+           done) &
+          mon=$!
+          trap 'kill "$mon" 2>/dev/null || true' EXIT
+          set +e
+          timeout -s TERM -k 30s 125m \
+            make -C kernel-5.15 O="$GITHUB_WORKSPACE/out" \
+              ARCH=arm64 LLVM=1 LLVM_IAS=1 LD="ld.lld --threads=1" \
+              -j2 Image.gz \
+              > "$dir/build.log" 2>&1
+          rc=$?
+          set -e
+          printf 'Image.gz build exit code: %s\n' "$rc" > "$dir/build-status.txt"
+          if (( rc != 0 )); then
+            echo "::error::Experimental build failed (exit $rc). Logs go only to private draft release."
+            exit "$rc"
+          fi
+          test -s out/arch/arm64/boot/Image.gz
+          echo "Image.gz compiled; not flashable or device validated."
+
+      - name: Compare all 250 supplemental vmlinux export CRCs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          private=Path(os.environ['RUNNER_TEMP'])/'nevada-private'
+          required=json.loads(private.joinpath('nevada-kmi-required-crcs.json').read_text())
+          path=Path('out/Module.symvers')
+          if not path.is_file():
+              raise SystemExit('No Module.symvers; cannot verify KMI')
+          actual={}
+          for line in path.read_text().splitlines():
+              parts=line.split()
+              if len(parts)<4:
+                  raise SystemExit('Malformed Module.symvers')
+              crc,name,owner=parts[:3]
+              if owner=='vmlinux' and name in required:
+                  if name in actual:
+                      raise SystemExit('Duplicate target export in Module.symvers')
+                  actual[name]=crc
+          missing=sorted(set(required)-set(actual))
+          mismatch=sorted(n for n in actual if int(actual[n],16)!=int(required[n],16))
+          result=dict(required=250,found=len(actual),missing=missing,crc_mismatches=mismatch)
+          private.joinpath('kmi-validation.json').write_text(json.dumps(result,indent=2)+'\n')
+          if len(required)!=250 or missing or mismatch:
+              raise SystemExit('Experimental KMI CRC validation failed; see PRIVATE report')
+          print('PASS: 250/250 supplemental vmlinux exports and CRCs match stock consumers.')
+          PY
+
+      # NEVER upload public artifacts. Even failures send diagnostics only
+      # to a draft release in the authenticated PRIVATE destination repository.
+      - name: Deliver ALL experimental outputs and reports privately
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Missing private delivery token"
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/nevada-private"
+          mkdir -p "$dir"
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'nevada-private'
+          out=Path('out')
+          log_names=('apt.log','clang-fetch.log','clang-version.txt','lld-version.txt',
+                     'source-clone.log','configure.log','build.log','build-status.txt',
+                     'resources.log','kmi-validation.json')
+          with zipfile.ZipFile(root/'PRIVATE-nevada-build-diagnostics.zip','w',zipfile.ZIP_DEFLATED) as z:
+              z.writestr('DO-NOT-FLASH.txt','Experimental private Nevada build diagnostics.\n')
+              for name in log_names:
+                  p=root/name
+                  if p.is_file(): z.write(p,name)
+          with zipfile.ZipFile(root/'PRIVATE-nevada-EXPERIMENTAL-DO-NOT-FLASH.zip','w',zipfile.ZIP_DEFLATED) as z:
+              z.writestr('DO-NOT-FLASH.txt','Experimental KMI-only image; SukiSU integration and boot compatibility NOT validated.\n')
+              names=('arch/arm64/boot/Image.gz','Module.symvers','System.map',
+                     '.config','abi_symbollist.raw','include/generated/autoksyms.h',
+                     'include/config/kernel.release')
+              for name in names:
+                  p=out/name
+                  if p.is_file(): z.write(p,name)
+          PY
+          tag="nevada-public-kmi-experimental-$GITHUB_RUN_ID"
+          printf 'Nevada XT2615-1 experimental KMI compilation on 16GiB public runner.\nPublic run: https://github.com/%s/actions/runs/%s\nDevice root manager: SukiSU Ultra. NOT FLASHABLE or boot tested.\nAll output/private diagnostic content is restricted to this private draft release.\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$dir/release-notes.txt"
+          gh release create "$tag" -R "$PRIVATE_REPO" \
+            --target "$PRIVATE_TARGET" --draft \
+            --title "Nevada KMI EXPERIMENTAL public-run $GITHUB_RUN_ID" \
+            --notes-file "$dir/release-notes.txt" \
+            "$dir/PRIVATE-nevada-build-diagnostics.zip" \
+            "$dir/PRIVATE-nevada-EXPERIMENTAL-DO-NOT-FLASH.zip" \
+            > "$dir/private-release.txt"
+          echo "Private draft release delivery completed. No public artifacts uploaded."
