@@ -246,7 +246,13 @@ jobs:
             exit "$rc"
           fi
           test -s out/arch/arm64/boot/Image.gz
-          echo "Image.gz compiled; not flashable or device validated."
+          # Image.gz's vmlinux link executes modpost and writes vmlinux.symvers.
+          # The combined Module.symvers file belongs to the separate modules target.
+          test -s out/vmlinux.symvers || {
+            echo "::error::vmlinux.symvers was not emitted by kernel link"
+            exit 1
+          }
+          echo "Image.gz and vmlinux.symvers built; not flashable or device validated."
 
       - name: Compare all 250 supplemental vmlinux export CRCs
         shell: bash
@@ -257,18 +263,18 @@ jobs:
           from pathlib import Path
           private=Path(os.environ['RUNNER_TEMP'])/'nevada-private'
           required=json.loads(private.joinpath('nevada-kmi-required-crcs.json').read_text())
-          path=Path('out/Module.symvers')
-          if not path.is_file():
-              raise SystemExit('No Module.symvers; cannot verify KMI')
+          path=Path('out/vmlinux.symvers')
+          if not path.is_file() or not path.stat().st_size:
+              raise SystemExit('No vmlinux.symvers; cannot verify KMI')
           actual={}
           for line in path.read_text().splitlines():
               parts=line.split()
               if len(parts)<4:
-                  raise SystemExit('Malformed Module.symvers')
+                  raise SystemExit('Malformed vmlinux.symvers')
               crc,name,owner=parts[:3]
               if owner=='vmlinux' and name in required:
                   if name in actual:
-                      raise SystemExit('Duplicate target export in Module.symvers')
+                      raise SystemExit('Duplicate target export in vmlinux.symvers')
                   actual[name]=crc
           missing=sorted(set(required)-set(actual))
           mismatch=sorted(n for n in actual if int(actual[n],16)!=int(required[n],16))
@@ -310,7 +316,7 @@ jobs:
                   if p.is_file(): z.write(p,name)
           with zipfile.ZipFile(root/'PRIVATE-nevada-EXPERIMENTAL-DO-NOT-FLASH.zip','w',zipfile.ZIP_DEFLATED) as z:
               z.writestr('DO-NOT-FLASH.txt','Experimental KMI-only image; SukiSU integration and boot compatibility NOT validated.\n')
-              names=('arch/arm64/boot/Image.gz','Module.symvers','System.map',
+              names=('arch/arm64/boot/Image.gz','vmlinux.symvers','Module.symvers','System.map',
                      '.config','abi_symbollist.raw','include/generated/autoksyms.h',
                      'include/config/kernel.release')
               for name in names:
