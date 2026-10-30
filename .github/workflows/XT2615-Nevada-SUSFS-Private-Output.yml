@@ -115,18 +115,23 @@ jobs:
             fi
           done
           AVAIL_KB="$(df -Pk "$GITHUB_WORKSPACE" | awk 'END{print $4}')"
-          # The prior Full-LTO link exhausted the runner's 11 GiB total swap.
-          # Reserve 12 GiB additional swap when >=16 GiB workspace volume is free.
+          # Full-LTO previously exhausted 15 GiB swap on the 8 GiB runner.
+          # Use the public runner's larger disk to provide up to 28 GiB extra swap.
+          # Keep at least 8 GiB free for source, outputs, and diagnostics.
           # This is a disposable CI runner only; do not change the phone.
           SWAP_GB=0
-          if [ "$AVAIL_KB" -ge 16777216 ]; then
+          if [ "$AVAIL_KB" -ge 37748736 ]; then
+            SWAP_GB=28
+          elif [ "$AVAIL_KB" -ge 33554432 ]; then
+            SWAP_GB=24
+          elif [ "$AVAIL_KB" -ge 29360128 ]; then
+            SWAP_GB=20
+          elif [ "$AVAIL_KB" -ge 25165824 ]; then
+            SWAP_GB=16
+          elif [ "$AVAIL_KB" -ge 20971520 ]; then
             SWAP_GB=12
-          elif [ "$AVAIL_KB" -ge 14680064 ]; then
-            SWAP_GB=10
-          elif [ "$AVAIL_KB" -ge 12582912 ]; then
+          elif [ "$AVAIL_KB" -ge 16777216 ]; then
             SWAP_GB=8
-          elif [ "$AVAIL_KB" -ge 10485760 ]; then
-            SWAP_GB=4
           fi
           if [ "$SWAP_GB" -gt 0 ]; then
             FILE=/mnt/nevada-lto.swap
@@ -273,7 +278,7 @@ jobs:
           # Keep the stock LTO config; reduce ld.lld memory pressure instead.
           LINKER='ld.lld --threads=1'
           echo "Starting bounded Full-LTO kernel image build."
-          echo "Full LTO retained; linker parallelism remains one." > reports/linker-settings.txt
+          echo "Full LTO retained; linker parallelism remains one; make parallelism reduced to -j1 to limit peak build memory." > reports/linker-settings.txt
           { ld.lld --version; free -h; df -h "$GITHUB_WORKSPACE"; } >> reports/linker-settings.txt 2>&1
           # Periodic diagnostic output is streamed to Actions logs even if the runner disappears.
           (
@@ -291,7 +296,7 @@ jobs:
           echo "Starting Image.gz-only test at $(date -u)" > reports/build-summary.txt
           timeout -s TERM -k 30s 100m \
             make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
-              ARCH=arm64 LLVM=1 LLVM_IAS=1 LD="$LINKER" -j2 Image.gz \
+              ARCH=arm64 LLVM=1 LLVM_IAS=1 LD="$LINKER" -j1 Image.gz \
               > reports/build.log 2>&1
           rc=${PIPESTATUS[0]}
           {
