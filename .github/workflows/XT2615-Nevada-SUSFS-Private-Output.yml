@@ -57,11 +57,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
+          sudo apt-get update -qq > reports/apt-install.log 2>&1
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             clang lld llvm make git bc bison flex gcc-aarch64-linux-gnu \
             libssl-dev libelf-dev libncurses-dev dwarves cpio rsync \
-            python3 xz-utils zstd file
+            python3 xz-utils zstd file >> reports/apt-install.log 2>&1
           { clang --version; ld.lld --version; df -h .; } > reports/toolchain.txt 2>&1
           echo "Build dependencies installed."
 
