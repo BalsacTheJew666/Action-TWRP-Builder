@@ -1,0 +1,402 @@
+name: Nevada SUSFS experimental kernel compile - public runner, private outputs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-susfs-public-private-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    if: github.repository == 'BalsacTheJew666/Action-TWRP-Builder' && github.ref == 'refs/heads/main'
+    # Public hosted runner; reject the job early unless it has at least 16 GiB RAM.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: private
+    timeout-minutes: 180
+    env:
+      PRIVATE_REPO: BalsacTheJew666/nevada-nethunter-baseline-xt2615
+      PRIVATE_REF: feature/nevada-susfs-5.15-preflight-20261029
+      SRC_BRANCH: android-16-release-w1wn36.18-114
+      SRC_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+    steps:
+      - name: Check out private Nevada source and build inputs
+        uses: actions/checkout@v4
+        with:
+          repository: BalsacTheJew666/nevada-nethunter-baseline-xt2615
+          ref: feature/nevada-susfs-5.15-preflight-20261029
+          token: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+          path: private
+          persist-credentials: false
+
+      - name: Verify public runner capacity and initialize private reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+          if (( mem_kb < 14680064 )); then
+            echo "::error::Public runner has less than 16 GiB RAM; refusing an unsafe Full-LTO attempt."
+            exit 1
+          fi
+          mkdir -p reports out
+          echo 'DO NOT FLASH: experimental SUSFS + KernelSU-Next compilation, NOT a validated boot.img or flashable ZIP.' > reports/DO-NOT-FLASH.txt
+          test -s configs/nevada-stock.config.gz
+          gzip -t configs/nevada-stock.config.gz
+          gzip -dc configs/nevada-stock.config.gz > out/.config
+          grep -q '^CONFIG_MODULES=y$' out/.config
+          grep -q '^CONFIG_CC_IS_CLANG=y$' out/.config
+          cp device/device-baseline.txt reports/device.txt
+          sha256sum configs/nevada-stock.config.gz > reports/config-sha256.txt
+
+      - name: Install LLVM build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            clang lld llvm make git bc bison flex gcc-aarch64-linux-gnu \
+            libssl-dev libelf-dev libncurses-dev dwarves cpio rsync \
+            python3 xz-utils zstd file
+          { clang --version; ld.lld --version; df -h .; } > reports/toolchain.txt 2>&1
+          echo "Build dependencies installed."
+
+      - name: Pin official Android Clang r450784e (14.0.7)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOL_DIR="$RUNNER_TEMP/android-llvm"
+          COMMIT=56fc36f789871f93ae5c6c038c76e5bf10b5d9a6
+          mkdir -p "$TOOL_DIR"
+          git -C "$TOOL_DIR" init -q
+          git -C "$TOOL_DIR" remote add origin \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          git -C "$TOOL_DIR" -c protocol.version=2 fetch --depth=1 \
+            --filter=blob:none origin "$COMMIT"
+          git -C "$TOOL_DIR" sparse-checkout init --cone
+          git -C "$TOOL_DIR" sparse-checkout set clang-r450784e
+          git -C "$TOOL_DIR" checkout --detach FETCH_HEAD
+          test "$(git -C "$TOOL_DIR" rev-parse HEAD)" = "$COMMIT"
+          CLANG_BIN="$TOOL_DIR/clang-r450784e/bin"
+          test -x "$CLANG_BIN/clang"
+          test -x "$CLANG_BIN/ld.lld"
+          "$CLANG_BIN/clang" --version | tee reports/clang14.txt
+          "$CLANG_BIN/ld.lld" --version | tee reports/lld14.txt
+          grep -Fq 'clang version 14.0.7' reports/clang14.txt
+          grep -Fq 'based on r450784e' reports/clang14.txt
+          grep -Eq '^LLD 14\.' reports/lld14.txt
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+          printf 'Android Clang repository commit: %s\n' "$COMMIT" \
+            | tee reports/clang-source.txt
+
+      # This affects only GitHub's disposable VM, never the phone or its partitions.
+      - name: Prepare safe runner storage and optional LTO swap
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '=== Runner storage before cleanup ==='
+            df -h "$GITHUB_WORKSPACE"
+            echo '=== Remove unused preinstalled SDKs (CI VM only) ==='
+          } | tee reports/runner-memory-setup.txt
+          # Kernel cross-compile does not require .NET, Android SDK, GHC, or PowerShell.
+          for D in /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc /usr/local/share/powershell; do
+            if [ -d "$D" ]; then
+              echo "Removing unused runner SDK: $D" | tee -a reports/runner-memory-setup.txt
+              sudo rm -rf -- "$D"
+            fi
+          done
+          AVAIL_KB="$(df -Pk "$GITHUB_WORKSPACE" | awk 'END{print $4}')"
+          # The prior Full-LTO link exhausted the runner's 11 GiB total swap.
+          # Reserve 12 GiB additional swap when >=16 GiB workspace volume is free.
+          # This is a disposable CI runner only; do not change the phone.
+          SWAP_GB=0
+          if [ "$AVAIL_KB" -ge 16777216 ]; then
+            SWAP_GB=12
+          elif [ "$AVAIL_KB" -ge 14680064 ]; then
+            SWAP_GB=10
+          elif [ "$AVAIL_KB" -ge 12582912 ]; then
+            SWAP_GB=8
+          elif [ "$AVAIL_KB" -ge 10485760 ]; then
+            SWAP_GB=4
+          fi
+          if [ "$SWAP_GB" -gt 0 ]; then
+            FILE=/mnt/nevada-lto.swap
+            echo "Attempting ${SWAP_GB} GiB additional swap on disposable runner" | tee -a reports/runner-memory-setup.txt
+            if sudo fallocate -l "${SWAP_GB}G" "$FILE" &&
+               sudo chmod 600 "$FILE" &&
+               sudo mkswap "$FILE" &&
+               sudo swapon "$FILE"; then
+              echo "Additional swap enabled" | tee -a reports/runner-memory-setup.txt
+            else
+              echo "Additional swap unavailable; keeping existing runner swap" | tee -a reports/runner-memory-setup.txt
+              sudo swapoff "$FILE" 2>/dev/null || true
+              sudo rm -f "$FILE"
+            fi
+          else
+            echo 'Insufficient spare storage for safe extra swap; using existing swap' | tee -a reports/runner-memory-setup.txt
+          fi
+          {
+            echo '=== Memory and swap ==='
+            free -h
+            swapon --show || true
+            echo '=== Remaining storage ==='
+            df -h "$GITHUB_WORKSPACE"
+          } 2>&1 | tee -a reports/runner-memory-setup.txt
+          # Favor swap-backed LTO over abrupt runner memory-pressure termination.
+          sudo sysctl -w vm.swappiness=100 | tee -a reports/runner-memory-setup.txt
+
+      - name: Apply Nevada SUSFS patch and integrate pinned KernelSU-Next
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Read-only investigation and patching in GitHub runner ONLY.
+          bash ci/susfs/probe.sh > reports/susfs-probe.log 2>&1
+          ROOT="$RUNNER_TEMP/nevada-susfs"
+          test -s "$ROOT/kernel/fs/susfs.c"
+          test -s "$ROOT/kernel/include/linux/susfs_def.h"
+          test -f "$ROOT/KernelSU-Next/kernel/Kconfig"
+          test -d "$ROOT/kernel/drivers"
+          mv "$ROOT/kernel" kernel-5.15
+          ln -s "$ROOT/KernelSU-Next/kernel" kernel-5.15/drivers/kernelsu
+          if ! grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' kernel-5.15/drivers/Makefile; then
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel-5.15/drivers/Makefile
+          fi
+          if ! grep -Fq 'source "drivers/kernelsu/Kconfig"' kernel-5.15/drivers/Kconfig; then
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' kernel-5.15/drivers/Kconfig
+          fi
+          kernel-5.15/scripts/config --file out/.config --enable KSU --enable KSU_SUSFS
+          sha256sum "$ROOT/KernelSU-Next/kernel/Kconfig" kernel-5.15/fs/susfs.c > reports/susfs-implementation-sha256.txt
+          echo "EXPERIMENTAL: NOR FLASHABLE NOR ABI-APPROVED" |
+            tee reports/susfs-build-status.txt
+
+      - name: Generate verified 2901-name candidate KMI whitelist
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=kernel-5.15/android/abi_gki_aarch64_mtk
+          SUP=ci/kmi/nevada-kmi-supplement.txt
+          CRCS=ci/kmi/nevada-kmi-required-crcs.json
+          RAW="$GITHUB_WORKSPACE/out/abi_symbollist.raw"
+          test -s "$SOURCE" && test -s "$SUP" && test -s "$CRCS"
+          printf '%s  %s\n' \
+            8b0141449ef2151701383dfcbb27bcb9fa4b0524bd9bf503dcff996794d4147a "$SUP" \
+            292f4a8aa9c2bd51b3d0734e260539a0640c628e217fb6f99d2b4d260d0621fa "$CRCS" \
+            | sha256sum -c - > reports/private-input-checksums.txt 2>&1
+          python3 - "$SOURCE" "$SUP" "$CRCS" "$RAW" <<'PY'
+          import configparser, hashlib, json, pathlib, re, sys
+          source, sup, crc_file, raw = map(pathlib.Path, sys.argv[1:])
+          p = configparser.ConfigParser(allow_no_value=True, strict=False)
+          p.optionxform = str
+          p.read(source)
+          base = set()
+          for section in p.sections():
+              if section.endswith(("whitelist", "symbol_list")):
+                  base.update(p[section].keys())
+          supplement = sup.read_text().splitlines()
+          required = json.loads(crc_file.read_text())
+          if not (len(base) == 2651 and len(supplement) == 250
+                  and len(set(supplement)) == 250
+                  and not base.intersection(supplement)
+                  and set(required) == set(supplement)
+                  and all(re.fullmatch(r"0x[0-9a-fA-F]{8}", v)
+                          for v in required.values())):
+              raise SystemExit("Invalid or inconsistent Nevada supplement")
+          combined = sorted(base | set(supplement))
+          if len(combined) != 2901:
+              raise SystemExit("Wrong candidate whitelist size")
+          raw.write_text("\n".join(combined) + "\n")
+          actual = hashlib.sha256(raw.read_bytes()).hexdigest()
+          if actual != "b3d62b77bc996bca0d5fe30c3ca68653ada1d6b2d5e48af8a3bc0b4c8a2481ed":
+              raise SystemExit("Candidate whitelist SHA256 mismatch")
+          print("Verified base: 2651; supplement: 250; total: 2901; sha256:", actual)
+          PY
+          kernel-5.15/scripts/config --file out/.config \
+            --enable TRIM_UNUSED_KSYMS \
+            --set-str UNUSED_KSYMS_WHITELIST "$RAW"
+          grep -F "CONFIG_UNUSED_KSYMS_WHITELIST=\"$RAW\"" out/.config \
+            | tee reports/kmi-whitelist.txt
+          sha256sum "$SOURCE" "$SUP" "$CRCS" "$RAW" \
+            | tee reports/kmi-whitelist-sha256.txt
+
+      - name: Enforce stock Full LTO selection before Kconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          kernel-5.15/scripts/config --file out/.config \
+            --disable LTO_CLANG_THIN --enable LTO_CLANG_FULL
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
+
+      - name: Derive build configuration from live Nevada config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp out/.config reports/config-before.txt
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
+            > reports/configure.log 2>&1
+          diff -u reports/config-before.txt out/.config > reports/config-diff.txt || true
+          cp out/.config reports/config-after.txt
+          grep -qx 'CONFIG_CLANG_VERSION=140007' out/.config
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
+          grep -qx '# CONFIG_LTO_CLANG_THIN is not set' out/.config
+          grep -qx 'CONFIG_KSU=y' out/.config
+          grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
+          grep -qx 'CONFIG_MODVERSIONS=y' out/.config
+          grep -qx 'CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
+          echo 'Stock LLVM 14.0.7, Full LTO and symbol versioning selected' \
+            | tee reports/strict-config-check.txt
+
+      - name: Record pre-compilation resource diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          { date -u; uname -a; free -h; df -h "$GITHUB_WORKSPACE"; nproc; } > reports/resources-before-build.txt 2>&1
+          sha256sum out/.config > reports/compiled-config-sha256.txt
+          grep -E '^CONFIG_(LTO|LTO_CLANG|LTO_CLANG_THIN|CFI_CLANG|MODVERSIONS|MODULE_SIG|TRIM_UNUSED_KSYMS)=' out/.config \
+            > reports/lto-kmi-config.txt
+          test -s reports/kmi-whitelist.txt
+          test -s reports/config-after.txt
+
+      - name: Attempt kernel image compilation with bounded LTO parallelism
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Keep the stock LTO config; reduce ld.lld memory pressure instead.
+          LINKER='ld.lld --threads=1'
+          echo "Starting bounded Full-LTO kernel image build."
+          echo "Full LTO retained; linker parallelism remains one." > reports/linker-settings.txt
+          { ld.lld --version; free -h; df -h "$GITHUB_WORKSPACE"; } >> reports/linker-settings.txt 2>&1
+          # Periodic diagnostic output is streamed to Actions logs even if the runner disappears.
+          (
+            while true; do
+              echo "===== RESOURCE HEARTBEAT $(date -u) ====="
+              free -m
+              df -h "$GITHUB_WORKSPACE"
+              ps -eo pid,comm,rss,etime --sort=-rss | head -n 12
+              if [ -r /sys/fs/cgroup/memory.events ]; then cat /sys/fs/cgroup/memory.events; fi
+              sleep 120
+            done
+          ) > reports/resources-live.log 2>&1 &
+          WATCH_PID=$!
+          trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
+          echo "Starting Image.gz-only test at $(date -u)" > reports/build-summary.txt
+          timeout -s TERM -k 30s 100m \
+            make -C kernel-5.15 O="$GITHUB_WORKSPACE/out" \
+              ARCH=arm64 LLVM=1 LLVM_IAS=1 LD="$LINKER" -j2 Image.gz \
+              > reports/build.log 2>&1
+          rc=${PIPESTATUS[0]}
+          {
+            echo "Image compile exit status: $rc"
+            date -u
+            free -h
+            df -h "$GITHUB_WORKSPACE"
+            if [ -r /sys/fs/cgroup/memory.events ]; then cat /sys/fs/cgroup/memory.events; fi
+          } >> reports/build-summary.txt 2>&1
+          if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -eq 124 ]; then
+              echo 'Image compilation exceeded 100-minute command limit' | tee -a reports/build-summary.txt
+            fi
+            exit "$rc"
+          fi
+          test -s out/arch/arm64/boot/Image.gz || exit 3
+          sha256sum out/arch/arm64/boot/Image.gz > reports/image-sha256.txt
+
+      - name: Compare 250 required CRCs against new vmlinux
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee reports/nevada-250-kmi-crc-validation.txt
+          import json, pathlib
+          required = json.loads(pathlib.Path("ci/kmi/nevada-kmi-required-crcs.json").read_text())
+          symvers = pathlib.Path("out/Module.symvers")
+          if not symvers.is_file():
+              raise SystemExit("FAIL: Module.symvers missing")
+          exports = {}
+          for line in symvers.read_text().splitlines():
+              parts = line.split()
+              if len(parts) < 4:
+                  raise SystemExit("FAIL: malformed Module.symvers")
+              crc, name, owner = parts[:3]
+              if owner == "vmlinux" and name in required:
+                  if name in exports:
+                      raise SystemExit("FAIL: duplicate vmlinux export: " + name)
+                  exports[name] = crc.lower()
+          missing = sorted(set(required) - set(exports))
+          differing = sorted(n for n in required if n in exports
+                             and int(required[n], 16) != int(exports[n], 16))
+          print("Required supplemental exports:", len(required))
+          print("Present in vmlinux Module.symvers:", len(exports))
+          print("Missing:", len(missing))
+          print("CRC mismatches:", len(differing))
+          print("First missing:", missing[:25])
+          print("First mismatches:", differing[:25])
+          if len(required) != 250 or missing or differing:
+              raise SystemExit("FAIL: candidate kernel is not stock KMI compatible")
+          print("PASS: 250 required vmlinux exports and CRCs match stock consumers")
+          PY
+
+      # No public workflow artifacts: detailed logs and images go to the private repository only.
+      - name: Deliver experimental outputs and diagnostics ONLY to private draft release
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing private delivery token."
+            exit 1
+          fi
+          mkdir -p reports out
+          python3 - <<'PY'
+          import hashlib, os, zipfile
+          from pathlib import Path
+          root = Path(".")
+          report_zip = root / "PRIVATE-nevada-build-diagnostics.zip"
+          with zipfile.ZipFile(report_zip, "w", zipfile.ZIP_DEFLATED) as z:
+              z.writestr("DO-NOT-FLASH.txt", "Private experimental diagnostics. Not a validated kernel release.\n")
+              for p in sorted((root / "reports").rglob("*")):
+                  if p.is_file():
+                      z.write(p, p.relative_to(root))
+          output_zip = root / "PRIVATE-nevada-SUSFS-EXPERIMENTAL-DO-NOT-FLASH.zip"
+          candidates = [
+              "out/arch/arm64/boot/Image.gz", "out/Module.symvers",
+              "out/vmlinux.symvers", "out/System.map", "out/.config",
+              "out/abi_symbollist.raw", "out/include/generated/autoksyms.h",
+              "out/include/config/kernel.release"
+          ]
+          with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as z:
+              z.writestr("DO-NOT-FLASH.txt",
+                         "EXPERIMENTAL ONLY. Not boot-tested, not a flashable ZIP, and not approved for device use.\n")
+              for name in candidates:
+                  p = root / name
+                  if p.is_file():
+                      z.write(p, name)
+          assets = [str(report_zip), str(output_zip)]
+          for name in list(assets):
+              p = Path(name)
+              digest = hashlib.sha256(p.read_bytes()).hexdigest()
+              Path(name + ".sha256").write_text(f"{digest}  {p.name}\n")
+              assets.append(name + ".sha256")
+          notes = Path("PRIVATE-RELEASE-NOTES.txt")
+          notes.write_text(
+              "Nevada XT2615-1 SUSFS + KernelSU-Next experimental build.\n"
+              f"Public builder run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\n"
+              "All detailed diagnostics and build outputs are attached to this PRIVATE draft release.\n"
+              "DO NOT FLASH: boot compatibility, module ABI, and device validation are not complete.\n"
+          )
+          tag = "nevada-susfs-public-private-" + os.environ["GITHUB_RUN_ID"]
+          import subprocess
+          subprocess.run([
+              "gh", "release", "create", tag, "-R", os.environ["PRIVATE_REPO"],
+              "--target", os.environ["PRIVATE_REF"], "--draft",
+              "--title", "Nevada SUSFS EXPERIMENTAL " + os.environ["GITHUB_RUN_ID"],
+              "--notes-file", str(notes), *assets
+          ], check=True, stdout=subprocess.DEVNULL)
+          print("Private draft release delivery completed.")
