@@ -1,6 +1,10 @@
 name: Nevada SUSFS experimental kernel compile - public runner, private outputs
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-SUSFS-Private-Output.yml'
   workflow_dispatch:
 
 permissions:
@@ -187,7 +191,7 @@ jobs:
             8b0141449ef2151701383dfcbb27bcb9fa4b0524bd9bf503dcff996794d4147a "$SUP" \
             292f4a8aa9c2bd51b3d0734e260539a0640c628e217fb6f99d2b4d260d0621fa "$CRCS" \
             | sha256sum -c - > reports/private-input-checksums.txt 2>&1
-          python3 - "$SOURCE" "$SUP" "$CRCS" "$RAW" <<'PY'
+          python3 - "$SOURCE" "$SUP" "$CRCS" "$RAW" <<'PY' > reports/kmi-whitelist-build.log 2>&1
           import configparser, hashlib, json, pathlib, re, sys
           source, sup, crc_file, raw = map(pathlib.Path, sys.argv[1:])
           p = configparser.ConfigParser(allow_no_value=True, strict=False)
