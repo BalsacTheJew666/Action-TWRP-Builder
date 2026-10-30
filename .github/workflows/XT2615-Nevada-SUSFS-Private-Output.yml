@@ -84,14 +84,14 @@ jobs:
           CLANG_BIN="$TOOL_DIR/clang-r450784e/bin"
           test -x "$CLANG_BIN/clang"
           test -x "$CLANG_BIN/ld.lld"
-          "$CLANG_BIN/clang" --version | tee reports/clang14.txt
-          "$CLANG_BIN/ld.lld" --version | tee reports/lld14.txt
+          "$CLANG_BIN/clang" --version > reports/clang14.txt 2>&1
+          "$CLANG_BIN/ld.lld" --version > reports/lld14.txt 2>&1
           grep -Fq 'clang version 14.0.7' reports/clang14.txt
           grep -Fq 'based on r450784e' reports/clang14.txt
           grep -Eq '^LLD 14\.' reports/lld14.txt
           echo "$CLANG_BIN" >> "$GITHUB_PATH"
           printf 'Android Clang repository commit: %s\n' "$COMMIT" \
-            | tee reports/clang-source.txt
+            > reports/clang-source.txt 2>&1
 
       # This affects only GitHub's disposable VM, never the phone or its partitions.
       - name: Prepare safe runner storage and optional LTO swap
@@ -219,9 +219,9 @@ jobs:
             --enable TRIM_UNUSED_KSYMS \
             --set-str UNUSED_KSYMS_WHITELIST "$RAW"
           grep -F "CONFIG_UNUSED_KSYMS_WHITELIST=\"$RAW\"" out/.config \
-            | tee reports/kmi-whitelist.txt
+            > reports/kmi-whitelist.txt 2>&1
           sha256sum "$SOURCE" "$SUP" "$CRCS" "$RAW" \
-            | tee reports/kmi-whitelist-sha256.txt
+            > reports/kmi-whitelist-sha256.txt 2>&1
 
       - name: Enforce stock Full LTO selection before Kconfig
         shell: bash
@@ -249,7 +249,7 @@ jobs:
           grep -qx 'CONFIG_MODVERSIONS=y' out/.config
           grep -qx 'CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
           echo 'Stock LLVM 14.0.7, Full LTO and symbol versioning selected' \
-            | tee reports/strict-config-check.txt
+            > reports/strict-config-check.txt 2>&1
 
       - name: Record pre-compilation resource diagnostics
         shell: bash
@@ -310,7 +310,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY' | tee reports/nevada-250-kmi-crc-validation.txt
+          python3 - <<'PY' > reports/nevada-250-kmi-crc-validation.txt 2>&1
           import json, pathlib
           required = json.loads(pathlib.Path("ci/kmi/nevada-kmi-required-crcs.json").read_text())
           symvers = pathlib.Path("out/Module.symvers")
