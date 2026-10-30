@@ -181,7 +181,7 @@ jobs:
           SOURCE=kernel-5.15/android/abi_gki_aarch64_mtk
           SUP=ci/kmi/nevada-kmi-supplement.txt
           CRCS=ci/kmi/nevada-kmi-required-crcs.json
-          RAW="$GITHUB_WORKSPACE/out/abi_symbollist.raw"
+          RAW="$GITHUB_WORKSPACE/private/out/abi_symbollist.raw"
           test -s "$SOURCE" && test -s "$SUP" && test -s "$CRCS"
           printf '%s  %s\n' \
             8b0141449ef2151701383dfcbb27bcb9fa4b0524bd9bf503dcff996794d4147a "$SUP" \
@@ -236,7 +236,7 @@ jobs:
         run: |
           set -euo pipefail
           cp out/.config reports/config-before.txt
-          make -C kernel-5.15 O="$GITHUB_WORKSPACE/out" \
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
             > reports/configure.log 2>&1
           diff -u reports/config-before.txt out/.config > reports/config-diff.txt || true
@@ -286,7 +286,7 @@ jobs:
           trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
           echo "Starting Image.gz-only test at $(date -u)" > reports/build-summary.txt
           timeout -s TERM -k 30s 100m \
-            make -C kernel-5.15 O="$GITHUB_WORKSPACE/out" \
+            make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
               ARCH=arm64 LLVM=1 LLVM_IAS=1 LD="$LINKER" -j2 Image.gz \
               > reports/build.log 2>&1
           rc=${PIPESTATUS[0]}
