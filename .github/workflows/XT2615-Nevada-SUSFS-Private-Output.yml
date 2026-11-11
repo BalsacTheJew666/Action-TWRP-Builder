@@ -271,6 +271,42 @@ jobs:
           test -s reports/kmi-whitelist.txt
           test -s reports/config-after.txt
 
+      - name: Compile and verify KernelSU SELinux fallback object before full link
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJ="out/drivers/kernelsu/feature/selinux_hide.o"
+          REPORT="reports/selinux-hide-object-symbols.txt"
+          mkdir -p reports
+          echo "Compiling only the KernelSU SELinux-hide translation unit."
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 \
+            drivers/kernelsu/feature/selinux_hide.o \
+            > reports/selinux-hide-object-build.log 2>&1
+          test -s "$OBJ"
+          NM="$(command -v llvm-nm || true)"
+          if [[ -z "$NM" ]]; then
+            echo "::error::llvm-nm is unavailable; refusing to skip compiled-symbol verification."
+            exit 1
+          fi
+          "$NM" --defined-only --extern-only "$OBJ" | tee "$REPORT"
+          for symbol in my_setprocattr my_write_context my_write_access; do
+            if ! awk -v wanted="$symbol" '$2 == "T" && $3 == wanted { found=1 } END { exit !found }' "$REPORT"; then
+              echo "::error::Missing global text definition in selinux_hide.o: $symbol"
+              exit 1
+            fi
+            echo "PASS: global text definition verified: $symbol"
+          done | tee reports/selinux-hide-object-verdict.txt
+          sha256sum "$OBJ" | tee reports/selinux-hide-object-sha256.txt
+          {
+            echo "Object: $OBJ"
+            echo "Compiler: $(clang --version | head -n 1)"
+            echo "Verifier: $NM"
+            echo "Required global text symbols: 3/3"
+            echo "Full kernel link: NOT YET PERFORMED"
+            echo "Flash approval: NO"
+          } | tee reports/selinux-hide-object-summary.txt
+
       - name: Attempt kernel image compilation with bounded LTO parallelism
         shell: bash
         run: |
