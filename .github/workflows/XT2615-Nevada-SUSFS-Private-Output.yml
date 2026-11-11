@@ -368,6 +368,36 @@ jobs:
           test -s out/arch/arm64/boot/Image.gz || exit 3
           sha256sum out/arch/arm64/boot/Image.gz > reports/image-sha256.txt
 
+      - name: Build configured modules and generate Module.symvers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Image.gz alone does not guarantee Module.symvers is generated.
+          # The modules target runs modpost against this exact configured vmlinux
+          # and emits the export/CRC table consumed by the following KMI gate.
+          test -s out/vmlinux
+          grep -qx 'CONFIG_MODULES=y' out/.config
+          grep -qx 'CONFIG_MODVERSIONS=y' out/.config
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 LD='ld.lld --threads=1' -j1 modules \
+            > reports/modules-build.log 2>&1
+          test -s out/Module.symvers || {
+            echo "::error::modules target completed without producing out/Module.symvers."
+            exit 1
+          }
+          vmlinux_exports="$(awk '$3 == "vmlinux" { count++ } END { print count+0 }' out/Module.symvers)"
+          if [ "$vmlinux_exports" -eq 0 ]; then
+            echo "::error::Module.symvers contains no vmlinux-owned exports."
+            exit 1
+          fi
+          {
+            echo "Module build: PASS"
+            echo "Module.symvers: out/Module.symvers"
+            echo "Total records: $(wc -l < out/Module.symvers)"
+            echo "vmlinux-owned exports: $vmlinux_exports"
+            sha256sum out/Module.symvers
+          } | tee reports/module-symvers-verdict.txt
+
       - name: Compare 250 required CRCs against new vmlinux
         shell: bash
         run: |
