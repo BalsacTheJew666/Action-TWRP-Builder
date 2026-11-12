@@ -442,69 +442,10 @@ jobs:
           modules_pass=NO
           kmi_pass=NO
           susfs_pass=NO
-          if grep -q 'Image compile exit status: 0' reports/build-summary.txt 2>/dev/null && test -s out/arch/arm64/boot/Image.gz; then image_pass=YES; fi
-          if grep -q '^Module build: PASS      - name: Deliver experimental outputs and diagnostics ONLY to private draft release
-        if: always()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
-        run: |
-          set -euo pipefail
-          umask 077
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::Missing private delivery token."
-            exit 1
-          fi
-          mkdir -p reports out
-          python3 - <<'PY'
-          import hashlib, os, zipfile
-          from pathlib import Path
-          root = Path(".")
-          report_zip = root / "PRIVATE-nevada-build-diagnostics.zip"
-          with zipfile.ZipFile(report_zip, "w", zipfile.ZIP_DEFLATED) as z:
-              z.writestr("DO-NOT-FLASH.txt", "Private experimental diagnostics. Not a validated kernel release.\n")
-              for p in sorted((root / "reports").rglob("*")):
-                  if p.is_file():
-                      z.write(p, p.relative_to(root))
-          output_zip = root / "PRIVATE-nevada-SUSFS-EXPERIMENTAL-DO-NOT-FLASH.zip"
-          candidates = [
-              "out/arch/arm64/boot/Image.gz", "out/Module.symvers",
-              "out/vmlinux.symvers", "out/System.map", "out/.config",
-              "out/abi_symbollist.raw", "out/include/generated/autoksyms.h",
-              "out/include/config/kernel.release"
-          ]
-          with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as z:
-              z.writestr("DO-NOT-FLASH.txt",
-                         "EXPERIMENTAL ONLY. Not boot-tested, not a flashable ZIP, and not approved for device use.\n")
-              for name in candidates:
-                  p = root / name
-                  if p.is_file():
-                      z.write(p, name)
-          assets = [str(report_zip), str(output_zip)]
-          for name in list(assets):
-              p = Path(name)
-              digest = hashlib.sha256(p.read_bytes()).hexdigest()
-              Path(name + ".sha256").write_text(f"{digest}  {p.name}\n")
-              assets.append(name + ".sha256")
-          notes = Path("PRIVATE-RELEASE-NOTES.txt")
-          notes.write_text(
-              "Nevada XT2615-1 SUSFS + KernelSU-Next experimental build.\n"
-              f"Public builder run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\n"
-              "All detailed diagnostics and build outputs are attached to this PRIVATE draft release.\n"
-              "DO NOT FLASH: boot compatibility, module ABI, and device validation are not complete.\n"
-          )
-          tag = "nevada-susfs-public-private-" + os.environ["GITHUB_RUN_ID"]
-          import subprocess
-          subprocess.run([
-              "gh", "release", "create", tag, "-R", os.environ["PRIVATE_REPO"],
-              "--target", os.environ["PRIVATE_REF"], "--draft",
-              "--title", "Nevada SUSFS EXPERIMENTAL " + os.environ["GITHUB_RUN_ID"],
-              "--notes-file", str(notes), *assets
-          ], check=True, stdout=subprocess.DEVNULL)
-          print("Private draft release delivery completed.")
- reports/module-symvers-verdict.txt 2>/dev/null; then modules_pass=YES; fi
-          if grep -q 'PASS: 250 required vmlinux exports and CRCs match stock consumers' reports/nevada-250-kmi-crc-validation.txt 2>/dev/null; then kmi_pass=YES; fi
-          if grep -q 'PASS: applied exactly one sus_path SRCU iterator correction' reports/susfs-probe.log 2>/dev/null; then susfs_pass=YES; fi
+          if grep -Fq 'Image compile exit status: 0' reports/build-summary.txt 2>/dev/null && test -s out/arch/arm64/boot/Image.gz; then image_pass=YES; fi
+          if grep -Fq 'Module build: PASS' reports/module-symvers-verdict.txt 2>/dev/null; then modules_pass=YES; fi
+          if grep -Fq 'PASS: 250 required vmlinux exports and CRCs match stock consumers' reports/nevada-250-kmi-crc-validation.txt 2>/dev/null; then kmi_pass=YES; fi
+          if grep -Fq 'PASS: applied exactly one sus_path SRCU iterator correction' reports/susfs-probe.log 2>/dev/null; then susfs_pass=YES; fi
           overall=PASS
           if [[ "$image_pass" != YES || "$modules_pass" != YES || "$kmi_pass" != YES || "$susfs_pass" != YES ]]; then overall=INCOMPLETE_OR_FAILED; fi
           {
@@ -522,9 +463,7 @@ jobs:
             echo "Flash approval: NO"
             echo "DO_NOT_FLASH: YES"
           } | tee reports/verdict.txt
-          if [[ "$overall" != PASS ]]; then
-            echo "::warning::One or more build-stage gates did not pass; inspect reports/verdict.txt and the detailed logs."
-          fi
+          if [[ "$overall" != PASS ]]; then echo "::warning::One or more build-stage gates did not pass; inspect reports/verdict.txt and detailed logs."; fi
 
       # No public workflow artifacts: detailed logs and images go to the private repository only.
       - name: Deliver experimental outputs and diagnostics ONLY to private draft release
