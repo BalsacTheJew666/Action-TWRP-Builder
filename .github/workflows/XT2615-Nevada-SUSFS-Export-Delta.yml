@@ -1,0 +1,190 @@
+name: XT2615 Nevada SUSFS export delta (private read-only audit)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-SUSFS-Export-Delta.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'BalsacTheJew666/Action-TWRP-Builder' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      PRIVATE_REPO: BalsacTheJew666/nevada-nethunter-baseline-xt2615
+      GH_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+      OLD_RUN_ID: "43153972039"
+      OLD_ARTIFACT_NAME: nevada-SUSFS-EXPERIMENTAL-DO-NOT-FLASH
+      CURRENT_RELEASE_ASSET_ID: "738463756"
+      CURRENT_ASSET_SHA256: 5a8fe48aa280d4f8028821fc23378e2d582b76dd3444b568edcb6a39f6e6e371
+    steps:
+      - name: Check out audit workflow
+        uses: actions/checkout@v4
+
+      - name: Retrieve old and current private build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/nevada-export-delta"
+          OLD="$ROOT/old"
+          NEW="$ROOT/new"
+          mkdir -p "$OLD" "$NEW" reports
+          gh run download "$OLD_RUN_ID" -R "$PRIVATE_REPO" \
+            -n "$OLD_ARTIFACT_NAME" -D "$OLD"
+          test -s "$OLD/vmlinux.symvers"
+          test -s "$OLD/.config"
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$PRIVATE_REPO/releases/assets/$CURRENT_RELEASE_ASSET_ID" \
+            > "$ROOT/current-candidate.zip"
+          echo "$CURRENT_ASSET_SHA256  $ROOT/current-candidate.zip" | sha256sum -c -
+          python3 - "$ROOT/current-candidate.zip" "$NEW" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          src, dest = Path(sys.argv[1]), Path(sys.argv[2])
+          if not zipfile.is_zipfile(src):
+              raise SystemExit("STOP: downloaded current release asset is not a ZIP")
+          with zipfile.ZipFile(src) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit("STOP: corrupt member: " + bad)
+              required = {"out/vmlinux.symvers", "out/Module.symvers", "out/.config"}
+              missing = sorted(required - set(z.namelist()))
+              if missing:
+                  raise SystemExit("STOP: candidate ZIP missing: " + ", ".join(missing))
+              z.extractall(dest)
+          print("Current candidate ZIP validated and extracted.")
+          PY
+
+      - name: Compare kernel exports and configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/nevada-export-delta"
+          python3 - "$ROOT/old" "$ROOT/new" reports/export-delta.json reports/export-delta.txt <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+
+          old_root, new_root = map(Path, sys.argv[1:3])
+          json_out, text_out = map(Path, sys.argv[3:5])
+
+          def sha(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          def read_symvers(path):
+              result = {}
+              for line_no, line in enumerate(path.read_text().splitlines(), 1):
+                  parts = line.split()
+                  if len(parts) < 4:
+                      raise ValueError(f"{path}:{line_no}: malformed row")
+                  crc, name, owner, export_type = parts[:4]
+                  if owner == "vmlinux":
+                      if name in result:
+                          raise ValueError(f"{path}:{line_no}: duplicate vmlinux export {name}")
+                      result[name] = {"crc": crc.lower(), "export": export_type}
+              return result
+
+          old_v = old_root / "vmlinux.symvers"
+          new_v = new_root / "out/vmlinux.symvers"
+          new_m = new_root / "out/Module.symvers"
+          old_cfg = old_root / ".config"
+          new_cfg = new_root / "out/.config"
+          old_exports = read_symvers(old_v)
+          new_v_exports = read_symvers(new_v)
+          new_m_exports = read_symvers(new_m)
+
+          def delta(a, b):
+              common = set(a) & set(b)
+              return {
+                  "missing": sorted(set(a) - set(b)),
+                  "added": sorted(set(b) - set(a)),
+                  "crc_mismatch": [
+                      {"symbol": name, "old": a[name], "new": b[name]}
+                      for name in sorted(common) if a[name]["crc"] != b[name]["crc"]
+                  ],
+                  "export_type_mismatch": [
+                      {"symbol": name, "old": a[name], "new": b[name]}
+                      for name in sorted(common) if a[name]["export"] != b[name]["export"]
+                  ],
+              }
+
+          old_cfg_map, new_cfg_map = {}, {}
+          for path, target in ((old_cfg, old_cfg_map), (new_cfg, new_cfg_map)):
+              for line in path.read_text().splitlines():
+                  if line.startswith("CONFIG_") and "=" in line:
+                      k, v = line.split("=", 1)
+                      target[k] = v
+                  elif line.startswith("# CONFIG_") and line.endswith(" is not set"):
+                      target[line[2:-11]] = "n"
+          cfg_changes = [
+              {"key": k, "old": old_cfg_map.get(k), "new": new_cfg_map.get(k)}
+              for k in sorted(set(old_cfg_map) | set(new_cfg_map))
+              if old_cfg_map.get(k) != new_cfg_map.get(k)
+          ]
+
+          result = {
+              "schema": "nevada-susfs-vmlinux-export-delta-v1",
+              "old_reference_run": 43153972039,
+              "current_candidate_release_asset_id": 738463756,
+              "old_vmlinux_symvers_sha256": sha(old_v),
+              "new_vmlinux_symvers_sha256": sha(new_v),
+              "new_Module_symvers_sha256": sha(new_m),
+              "old_vmlinux_export_count": len(old_exports),
+              "new_vmlinux_symvers_export_count": len(new_v_exports),
+              "new_Module_symvers_total_records": len(new_m.read_text().splitlines()),
+              "new_Module_symvers_vmlinux_export_count": len(new_m_exports),
+              "old_to_new_vmlinux_symvers": delta(old_exports, new_v_exports),
+              "old_to_new_Module_symvers": delta(old_exports, new_m_exports),
+              "new_vmlinux_symvers_to_Module_symvers": delta(new_v_exports, new_m_exports),
+              "config_change_count": len(cfg_changes),
+              "config_changes": cfg_changes,
+              "flash_approval": "NO",
+              "note": "Read-only export/config comparison only; no stock modules loaded, no boot package, no AVB validation, no device writes."
+          }
+          json_out.parent.mkdir(parents=True, exist_ok=True)
+          json_out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+
+          lines = [
+              "NEVADA XT2615-1 — VMLINUX EXPORT DELTA",
+              f"Old reference exports: {len(old_exports)}",
+              f"Current out/vmlinux.symvers exports: {len(new_v_exports)}",
+              f"Current out/Module.symvers records: {len(new_m.read_text().splitlines())}",
+              f"Current Module.symvers vmlinux-owned exports: {len(new_m_exports)}",
+              "",
+          ]
+          for label, item in (
+              ("OLD -> NEW vmlinux.symvers", result["old_to_new_vmlinux_symvers"]),
+              ("OLD -> NEW Module.symvers", result["old_to_new_Module_symvers"]),
+              ("NEW vmlinux.symvers -> Module.symvers", result["new_vmlinux_symvers_to_Module_symvers"]),
+          ):
+              lines += [label, "  Missing: " + str(item["missing"]),
+                        "  Added: " + str(item["added"]),
+                        "  CRC mismatches: " + json.dumps(item["crc_mismatch"]),
+                        "  Export-type mismatches: " + json.dumps(item["export_type_mismatch"]), ""]
+          lines.append(f"Config changes: {len(cfg_changes)}")
+          for item in cfg_changes:
+              lines.append(f"  {item['key']}: {item['old']} -> {item['new']}")
+          lines += ["", "DO_NOT_FLASH: YES"]
+          text_out.write_text("\n".join(lines) + "\n")
+          print(text_out.read_text())
+          PY
+
+      - name: Deliver comparison report to private draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="nevada-susfs-export-delta-43167173084"
+          printf '%s\n' \
+            'Read-only comparison of the prior passing export inventory and the current candidate.' \
+            'This report does not establish full stock-module closure or runtime/boot safety.' \
+            'DO_NOT_FLASH: YES' > reports/release-notes.txt
+          gh release create "$TAG" -R "$PRIVATE_REPO" \
+            --target feature/nevada-susfs-5.15-preflight-20261029 --draft \
+            --title "Nevada SUSFS export delta 43167173084" \
+            --notes-file reports/release-notes.txt \
+            reports/export-delta.txt reports/export-delta.json
+
