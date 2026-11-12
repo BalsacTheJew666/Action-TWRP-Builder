@@ -183,22 +183,24 @@ jobs:
           echo "EXPERIMENTAL: NOR FLASHABLE NOR ABI-APPROVED" |
             tee reports/susfs-build-status.txt
 
-      - name: Generate verified 2901-name candidate KMI whitelist
+      - name: Generate verified 2902-name candidate KMI whitelist
         shell: bash
         run: |
           set -euo pipefail
           SOURCE=kernel-5.15/android/abi_gki_aarch64_mtk
           SUP=ci/kmi/nevada-kmi-supplement.txt
           CRCS=ci/kmi/nevada-kmi-required-crcs.json
+          ADD=ci/kmi/nevada-kmi-v3-additional-required-crcs.json
           RAW="$GITHUB_WORKSPACE/private/out/abi_symbollist.raw"
-          test -s "$SOURCE" && test -s "$SUP" && test -s "$CRCS"
+          test -s "$SOURCE" && test -s "$SUP" && test -s "$CRCS" && test -s "$ADD"
           printf '%s  %s\n' \
             8b0141449ef2151701383dfcbb27bcb9fa4b0524bd9bf503dcff996794d4147a "$SUP" \
             292f4a8aa9c2bd51b3d0734e260539a0640c628e217fb6f99d2b4d260d0621fa "$CRCS" \
+            9175f5a175c963b34ef02acbbf16f8ac3be85c8d "$ADD" \
             | sha256sum -c - > reports/private-input-checksums.txt 2>&1
-          python3 - "$SOURCE" "$SUP" "$CRCS" "$RAW" <<'PY' > reports/kmi-whitelist-build.log 2>&1
+          python3 - "$SOURCE" "$SUP" "$CRCS" "$ADD" "$RAW" <<'PY' > reports/kmi-whitelist-build.log 2>&1
           import configparser, hashlib, json, pathlib, re, sys
-          source, sup, crc_file, raw = map(pathlib.Path, sys.argv[1:])
+          source, sup, crc_file, add_file, raw = map(pathlib.Path, sys.argv[1:])
           p = configparser.ConfigParser(allow_no_value=True, strict=False)
           p.optionxform = str
           p.read(source)
@@ -208,6 +210,7 @@ jobs:
                   base.update(p[section].keys())
           supplement = sup.read_text().splitlines()
           required = json.loads(crc_file.read_text())
+          additional = json.loads(add_file.read_text())
           if not (len(base) == 2651 and len(supplement) == 250
                   and len(set(supplement)) == 250
                   and not base.intersection(supplement)
@@ -215,21 +218,25 @@ jobs:
                   and all(re.fullmatch(r"0x[0-9a-fA-F]{8}", v)
                           for v in required.values())):
               raise SystemExit("Invalid or inconsistent Nevada supplement")
-          combined = sorted(base | set(supplement))
-          if len(combined) != 2901:
+          if additional != {"sock_create_kern": "0x883648f5"}:
+              raise SystemExit("Unexpected Nevada V3 additional CRC record")
+          if set(additional).intersection(base | set(supplement)):
+              raise SystemExit("V3 additional symbol duplicates an existing whitelist name")
+          combined = sorted(base | set(supplement) | set(additional))
+          if len(combined) != 2902:
               raise SystemExit("Wrong candidate whitelist size")
           raw.write_text("\n".join(combined) + "\n")
           actual = hashlib.sha256(raw.read_bytes()).hexdigest()
-          if actual != "b3d62b77bc996bca0d5fe30c3ca68653ada1d6b2d5e48af8a3bc0b4c8a2481ed":
+          if actual != "bcca6d5f897f702ee1180cb371e6dd979b558ced54cc34814705589fd36d9758":
               raise SystemExit("Candidate whitelist SHA256 mismatch")
-          print("Verified base: 2651; supplement: 250; total: 2901; sha256:", actual)
+          print("Verified base: 2651; supplement: 250; V3 additional: 1; total: 2902; sha256:", actual)
           PY
           kernel-5.15/scripts/config --file out/.config \
             --enable TRIM_UNUSED_KSYMS \
             --set-str UNUSED_KSYMS_WHITELIST "$RAW"
           grep -F "CONFIG_UNUSED_KSYMS_WHITELIST=\"$RAW\"" out/.config \
             > reports/kmi-whitelist.txt 2>&1
-          sha256sum "$SOURCE" "$SUP" "$CRCS" "$RAW" \
+          sha256sum "$SOURCE" "$SUP" "$CRCS" "$ADD" "$RAW" \
             > reports/kmi-whitelist-sha256.txt 2>&1
 
       - name: Enforce stock Full LTO selection before Kconfig
@@ -398,13 +405,17 @@ jobs:
             sha256sum out/Module.symvers
           } | tee reports/module-symvers-verdict.txt
 
-      - name: Compare 250 required CRCs against new vmlinux
+      - name: Compare 251 required CRCs against new vmlinux
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY' > reports/nevada-250-kmi-crc-validation.txt 2>&1
+          python3 - <<'PY' > reports/nevada-251-kmi-crc-validation.txt 2>&1
           import json, pathlib
           required = json.loads(pathlib.Path("ci/kmi/nevada-kmi-required-crcs.json").read_text())
+          additional = json.loads(pathlib.Path("ci/kmi/nevada-kmi-v3-additional-required-crcs.json").read_text())
+          if set(required).intersection(additional):
+              raise SystemExit("FAIL: duplicate symbols across KMI CRC manifests")
+          required.update(additional)
           symvers = pathlib.Path("out/Module.symvers")
           if not symvers.is_file():
               raise SystemExit("FAIL: Module.symvers missing")
@@ -427,9 +438,9 @@ jobs:
           print("CRC mismatches:", len(differing))
           print("First missing:", missing[:25])
           print("First mismatches:", differing[:25])
-          if len(required) != 250 or missing or differing:
+          if len(required) != 251 or missing or differing:
               raise SystemExit("FAIL: candidate kernel is not stock KMI compatible")
-          print("PASS: 250 required vmlinux exports and CRCs match stock consumers")
+          print("PASS: all 251 required vmlinux exports and CRCs match stock consumers")
           PY
 
       - name: Write final build-stage verdict
@@ -444,7 +455,7 @@ jobs:
           susfs_pass=NO
           if grep -Fq 'Image compile exit status: 0' reports/build-summary.txt 2>/dev/null && test -s out/arch/arm64/boot/Image.gz; then image_pass=YES; fi
           if grep -Fq 'Module build: PASS' reports/module-symvers-verdict.txt 2>/dev/null; then modules_pass=YES; fi
-          if grep -Fq 'PASS: 250 required vmlinux exports and CRCs match stock consumers' reports/nevada-250-kmi-crc-validation.txt 2>/dev/null; then kmi_pass=YES; fi
+          if grep -Fq 'PASS: all 251 required vmlinux exports and CRCs match stock consumers' reports/nevada-251-kmi-crc-validation.txt 2>/dev/null; then kmi_pass=YES; fi
           if grep -Fq 'PASS: applied exactly one sus_path SRCU iterator correction' reports/susfs-probe.log 2>/dev/null; then susfs_pass=YES; fi
           overall=PASS
           if [[ "$image_pass" != YES || "$modules_pass" != YES || "$kmi_pass" != YES || "$susfs_pass" != YES ]]; then overall=INCOMPLETE_OR_FAILED; fi
@@ -455,7 +466,7 @@ jobs:
             echo "SUSFS SRCU correction: $susfs_pass"
             echo "Kernel Image.gz compilation: $image_pass"
             echo "Configured modules / Module.symvers: $modules_pass"
-            echo "250 supplemental vmlinux KMI CRC gate: $kmi_pass"
+            echo "251 supplemental vmlinux KMI CRC gate (includes sock_create_kern): $kmi_pass"
             echo "Build-stage verdict: $overall"
             echo "Full 371-stock-module closure: external post-build audit; not executed by this CI workflow"
             echo "Boot image packaging / boot validation: NOT PERFORMED"
