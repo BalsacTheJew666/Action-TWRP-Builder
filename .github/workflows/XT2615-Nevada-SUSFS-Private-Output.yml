@@ -189,6 +189,31 @@ jobs:
           echo "EXPERIMENTAL: NOR FLASHABLE NOR ABI-APPROVED" |
             tee reports/susfs-build-status.txt
 
+      - name: Expose SUSFS probe diagnostics when integration fails
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          echo "===== OUTER SUSFS PROBE LOG ====="
+          if [ -s reports/susfs-probe.log ]; then
+            cat reports/susfs-probe.log
+          else
+            echo "reports/susfs-probe.log is missing or empty"
+          fi
+          echo "===== INNER SUSFS PROBE LOG ====="
+          if [ -s reports/probe.log ]; then
+            cat reports/probe.log
+          else
+            echo "reports/probe.log is missing or empty"
+          fi
+          echo "===== KSU COMPATIBILITY REPORT ====="
+          if [ -s reports/ksu-next-compat-report.txt ]; then
+            cat reports/ksu-next-compat-report.txt
+          else
+            echo "Compatibility report was not produced"
+          fi
+          exit 0
+
       - name: Generate verified 2902-name candidate KMI whitelist
         shell: bash
         run: |
