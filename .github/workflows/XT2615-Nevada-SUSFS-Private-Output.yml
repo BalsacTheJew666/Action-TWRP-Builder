@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 180
     env:
       PRIVATE_REPO: BalsacTheJew666/nevada-nethunter-baseline-xt2615
-      PRIVATE_REF: fix/nevada-exact-stock-kernelrelease-20261115
+      PRIVATE_REF: feature/nevada-susfs-5.15-preflight-20261029
       SRC_BRANCH: android-16-release-w1wn36.18-114
       SRC_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
     steps:
@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BalsacTheJew666/nevada-nethunter-baseline-xt2615
-          ref: fix/nevada-exact-stock-kernelrelease-20261115
+          ref: feature/nevada-susfs-5.15-preflight-20261029
           token: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
           path: private
           persist-credentials: false
