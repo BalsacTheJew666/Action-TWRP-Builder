@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m unittest discover -s tests -p 'test_nevada_kernel_release_identity.py'
+          python3 -m unittest discover -s tests -p 'test_nevada_*.py'
 
       - name: Verify public runner capacity and initialize private reports
         shell: bash
