@@ -38,6 +38,12 @@ jobs:
           path: private
           persist-credentials: false
 
+      - name: Test exact Nevada kernel release identity gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_nevada_*.py'
+
       - name: Verify public runner capacity and initialize private reports
         shell: bash
         run: |
@@ -255,6 +261,49 @@ jobs:
           make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
             > reports/configure.log 2>&1
+
+          # Enforce the complete device uname -r value. A matching vermagic
+          # suffix does not make a different release prefix module-compatible.
+          EXPECTED_LOCALVERSION="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+          baseline = Path("device/device-baseline.txt").read_text()
+          release = next((line.split(":", 1)[1].strip()
+                          for line in baseline.splitlines()
+                          if line.startswith("Kernel:")), None)
+          if not release:
+              raise SystemExit("Kernel release missing from device baseline")
+          makefile = Path("kernel-5.15/Makefile").read_text()
+          parts = []
+          for key in ("VERSION", "PATCHLEVEL", "SUBLEVEL"):
+              match = re.search(rf"^{key}\s*=\s*(\d+)\s*$",
+                                makefile, re.MULTILINE)
+              if not match:
+                  raise SystemExit(f"{key} missing from kernel Makefile")
+              parts.append(match.group(1))
+          base = ".".join(parts)
+          if not release.startswith(base):
+              raise SystemExit(f"Device release {release!r} does not match source base {base!r}")
+          print(release[len(base):])
+          PY
+          )"
+          kernel-5.15/scripts/config --file out/.config \
+            --set-str LOCALVERSION "$EXPECTED_LOCALVERSION" \
+            --disable LOCALVERSION_AUTO
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
+            > reports/configure-release-identity.log 2>&1
+          ACTUAL_KERNEL_RELEASE="$(make -s -C kernel-5.15 \
+            O="$GITHUB_WORKSPACE/private/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            kernelrelease LOCALVERSION=)"
+          python3 tools/nevada-kernel-release-identity.py \
+            --baseline device/device-baseline.txt \
+            --kernel-makefile kernel-5.15/Makefile \
+            --config out/.config \
+            --actual-release "$ACTUAL_KERNEL_RELEASE" \
+            --source-tree kernel-5.15 --objtree out \
+            --output reports/kernel-release-identity.json
+          printf 'LOCALVERSION=\n' >> "$GITHUB_ENV"
           diff -u reports/config-before.txt out/.config > reports/config-diff.txt || true
           cp out/.config reports/config-after.txt
           grep -qx 'CONFIG_CLANG_VERSION=140007' out/.config
