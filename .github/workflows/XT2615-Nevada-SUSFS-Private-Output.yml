@@ -494,6 +494,63 @@ jobs:
           import hashlib, os, zipfile
           from pathlib import Path
           root = Path(".")
+          # Preserve the exact modules produced by this build for private ELF/ABI review.
+          module_paths = [
+              "drivers/block/zram/zram.ko",
+              "drivers/misc/mediatek/et/mtk_et.ko",
+              "mm/zsmalloc.ko",
+              "sound/soc/codecs/mt6359p-accdet.ko",
+          ]
+          module_files = [(name, root / "out" / name) for name in module_paths]
+          missing_modules = [name for name, path in module_files if not path.is_file() or path.stat().st_size == 0]
+          module_zip = root / "PRIVATE-nevada-built-modules.zip"
+          module_status = root / "reports" / "built-modules-artifact-status.txt"
+          if missing_modules:
+              module_status.write_text(
+                  "MODULE ARTIFACT INCOMPLETE; no module archive created.\n"
+                  + "Missing or empty modules:\n"
+                  + "\n".join(missing_modules) + "\n"
+              )
+              module_zip = None
+          else:
+              lines = [
+                  "Motorola XT2615-1 (nevada) compiled-module audit bundle",
+                  "Firmware baseline: W1WNS36.18-114-1",
+                  "Kernel source commit: " + os.environ["SRC_SHA"],
+                  "Kernel source branch: " + os.environ["SRC_BRANCH"],
+                  "Build run: " + os.environ["GITHUB_RUN_ID"],
+                  "Kernel release: " + (root / "out/include/config/kernel.release").read_text().strip(),
+                  "Compiler: " + (root / "reports/clang14.txt").read_text().splitlines()[0],
+                  "Config SHA-256: " + hashlib.sha256((root / "out/.config").read_bytes()).hexdigest(),
+                  "Module.symvers SHA-256: " + hashlib.sha256((root / "out/Module.symvers").read_bytes()).hexdigest(),
+                  "",
+                  "SHA256  SIZE_BYTES  MODULE_PATH",
+              ]
+              for name, path in module_files:
+                  data = path.read_bytes()
+                  lines.append(f"{hashlib.sha256(data).hexdigest()}  {len(data)}  {name}")
+              manifest = "\n".join(lines) + "\n"
+              (root / "reports" / "built-modules-manifest.txt").write_text(manifest)
+              with zipfile.ZipFile(module_zip, "w", zipfile.ZIP_DEFLATED) as z:
+                  z.writestr("MANIFEST.txt", manifest)
+                  for name, path in module_files:
+                      z.write(path, "modules/" + name)
+                  for name in [
+                      "out/.config",
+                      "out/Module.symvers",
+                      "out/include/config/kernel.release",
+                      "reports/clang14.txt",
+                      "reports/modules-build.log",
+                      "reports/module-symvers-verdict.txt",
+                  ]:
+                      p = root / name
+                      if p.is_file():
+                          z.write(p, "metadata/" + name.removeprefix("out/").removeprefix("reports/"))
+              module_status.write_text(
+                  "PASS: all four requested compiled modules were archived.\n"
+                  + "Archive: " + module_zip.name + "\n"
+                  + "Manifest: reports/built-modules-manifest.txt\n"
+              )
           report_zip = root / "PRIVATE-nevada-build-diagnostics.zip"
           with zipfile.ZipFile(report_zip, "w", zipfile.ZIP_DEFLATED) as z:
               z.writestr("DO-NOT-FLASH.txt", "Private experimental diagnostics. Not a validated kernel release.\n")
@@ -515,6 +572,8 @@ jobs:
                   if p.is_file():
                       z.write(p, name)
           assets = [str(report_zip), str(output_zip)]
+          if module_zip is not None:
+              assets.append(str(module_zip))
           for name in list(assets):
               p = Path(name)
               digest = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -525,6 +584,7 @@ jobs:
               "Nevada XT2615-1 SUSFS + KernelSU-Next experimental build.\n"
               f"Public builder run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\n"
               "All detailed diagnostics and build outputs are attached to this PRIVATE draft release.\n"
+              "When all four expected module outputs exist, PRIVATE-nevada-built-modules.zip contains the compiled .ko files and SHA-256 manifest.\n"
               "DO NOT FLASH: boot compatibility, module ABI, and device validation are not complete.\n"
           )
           tag = "nevada-susfs-public-private-" + os.environ["GITHUB_RUN_ID"]
@@ -536,3 +596,4 @@ jobs:
               "--notes-file", str(notes), *assets
           ], check=True, stdout=subprocess.DEVNULL)
           print("Private draft release delivery completed.")
+          PY
