@@ -97,6 +97,35 @@ If the report still says \`loaded ELF module files read: 0\`, share **only** the
 This remains a **corroborating** module-import witness check; it cannot establish on-device core exports, driver loadability, module-signature behavior, CFI, correct \`vermagic\`, USB OTG, firmware or safe installation. The two missing \`rfkill_pause_polling\` and \`usb_get_urb\` exports remain blockers regardless of the witness count.
 
 
+## Duplicate stock module paths — October 27 second-run fix
+
+After adding read-only module path discovery, the Moto G Play 2026 reported **362 matches** from unprivileged enumeration, **392 total** from root \`find\`, including **362** rooted matches against names in \`/proc/modules\`, but **zero module ELFs examined**. This rules out the original inability to discover module paths. Previously, the audit skipped a module whenever multiple candidates shared its basename, even when those candidates were identical binaries reachable through alias mounts such as \`/vendor_dlkm\` and \`/vendor\`.
+
+The v3 audit resolves candidates conservatively:
+
+- Read each candidate \`.ko\` without executing it, and group byte-identical copies by SHA-256. Multiple identical files count as **one** module witness.
+- When different binaries share the same basename, compare the raw ELF \`.note.gnu.build-id\` section with \`/sys/module/NAME/notes/.note.gnu.build-id\` from the **running** module. Select only one uniquely matching binary.
+- If different candidates cannot be identified from a live Build-ID, leave the module ambiguous. If a live Build-ID is available but disagrees with the single candidate, do **not** use it.
+- Report \`module_selection_reasons\`, \`identical_duplicate_groups_resolved\`, \`matching_live_build_ids_verified\` and whether no modules could be selected.
+
+The CI regression suite creates (1) two byte-identical ELFs under two paths and proves that one witness is collected, (2) different ELFs with no authentic live Build-ID and proves none is selected, and (3) differing ELFs where exactly one matches a mocked live GNU Build-ID and proves it alone is selected.
+
+### Read-only rerun from Termux
+
+~~~bash
+cd "$HOME/nevada-live-kmi" || exit 1
+
+gh api -H "Accept: application/vnd.github.raw+json" \
+  "repos/BalsacTheJew666/Action-TWRP-Builder/contents/scripts/nevada-ar9271-live-core-kmi-witness.py?ref=nevada-live-kmi-identical-module-dedup" \
+  > witness.py.new &&
+python -m py_compile witness.py.new &&
+mv witness.py.new witness.py &&
+python witness.py --manifest core-kmi.tsv --output live-core-kmi.json
+~~~
+
+Share the \`Kernel:\`, \`Module path discovery:\`, \`Module selection:\`, witness count and \`Two GKI-missing export names\` lines. The lengthy symbol list is needed only if mismatches arise.
+
+**Still diagnostic-only:** The two missing official and on-device \`rfkill_pause_polling\` / \`usb_get_urb\` core exports, the candidate kernel \`vermagic\` mismatch, CFI, KernelSU and Motorola signing requirements continue to block safe driver installation. Even all 101 corroborated CRC imports would not constitute proof of module loadability.
 ## Confirmed next diagnostic (Oct 27, 2026): 362 paths found, zero ELF objects selected
 
 The rooted phone now reports **362 matching .ko paths from unprivileged discovery** and **362 matching .ko paths from root \`find\`**, with 392 total .ko paths enumerated by root. This makes the previous explanation ("no access to module directories") unlikely. The previous program discarded any loaded module basename with \`len(paths)!=1\`, and the Android bind mounts and mounted partition aliases can expose multiple paths for the same file. Because no \`ambiguous_module_names\` details were included in the console, this is a **strong hypothesis rather than proven root cause**; the JSON contains those diagnostics.
