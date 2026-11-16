@@ -318,6 +318,24 @@ jobs:
           make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
             > reports/configure-release-identity.log 2>&1
+
+          # Synchronize generated Kconfig metadata before kernelrelease.
+          # kernelrelease reads include/config/auto.conf, not just .config.
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 syncconfig \
+            > reports/configure-syncconfig.log 2>&1
+          grep -Fqx 'CONFIG_LOCALVERSION="-android13-8-00018-g9b2308ac0ad6-ab14563692"' \
+            out/include/config/auto.conf
+          if grep -qx 'CONFIG_LOCALVERSION_AUTO=y' out/include/config/auto.conf; then
+            echo 'FAIL: generated auto.conf still enables CONFIG_LOCALVERSION_AUTO' >&2
+            exit 1
+          fi
+          {
+            echo '=== Effective generated Kconfig release settings ==='
+            grep -E '^CONFIG_LOCALVERSION(=|_AUTO=)' out/include/config/auto.conf || true
+            echo '=== Source .config release settings ==='
+            grep -E '^CONFIG_LOCALVERSION=|^# CONFIG_LOCALVERSION_AUTO' out/.config
+          } > reports/release-kconfig-sync.txt
           ACTUAL_KERNEL_RELEASE="$(make -s -C kernel-5.15 \
             O="$GITHUB_WORKSPACE/private/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             kernelrelease LOCALVERSION=)"
