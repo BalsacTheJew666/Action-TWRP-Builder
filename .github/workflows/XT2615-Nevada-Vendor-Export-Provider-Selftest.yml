@@ -1,0 +1,45 @@
+name: XT2615-1 Nevada - Vendor Module Export Provider Attribution Selftest
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-Vendor-Export-Provider-Selftest.yml'
+      - 'scripts/nevada-vendor-module-export-attribution.py'
+      - 'ci/nevada-vendor-module-export-attribution-e2e.py'
+      - 'NEVADA-VENDOR-MODULE-EXPORT-PROVIDERS.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-ELF-read-only:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source-only provider attribution scanner
+        uses: actions/checkout@v4
+
+      - name: Verify syntax of local-only scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/nevada-vendor-module-export-attribution.py \
+            scripts/nevada-stock-vendor-kmi-import-inventory.py \
+            scripts/nevada-ar9271-live-core-kmi-witness.py \
+            ci/nevada-vendor-module-export-attribution-e2e.py
+
+      - name: Test export-name provider association with synthetic ELF only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/nevada-vendor-module-export-attribution-e2e.py
+
+      - name: Confirm no device operations and no device artifacts
+        shell: bash
+        run: |
+          echo 'End-to-end checks used only synthetic ELF data.'
+          echo 'No stock vendor files, imported private CRC records, boot images or device secrets are collected in CI.'
+          echo 'This workflow never invokes su/insmod, signs modules or packages a flashable kernel.'

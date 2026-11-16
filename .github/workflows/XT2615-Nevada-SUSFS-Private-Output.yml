@@ -1,0 +1,707 @@
+name: Nevada SUSFS experimental kernel compile - public runner, private outputs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-SUSFS-Private-Output.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-susfs-public-private-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    if: github.repository == 'BalsacTheJew666/Action-TWRP-Builder' && github.ref == 'refs/heads/main'
+    # Public hosted runner; reject the job early unless it has at least 16 GiB RAM.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: private
+    timeout-minutes: 180
+    env:
+      PRIVATE_REPO: BalsacTheJew666/nevada-nethunter-baseline-xt2615
+      PRIVATE_REF: feature/nevada-susfs-5.15-preflight-20261029
+      SRC_BRANCH: android-16-release-w1wn36.18-114
+      SRC_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+    steps:
+      - name: Check out private Nevada source and build inputs
+        uses: actions/checkout@v4
+        with:
+          repository: BalsacTheJew666/nevada-nethunter-baseline-xt2615
+          ref: feature/nevada-susfs-5.15-preflight-20261029
+          token: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+          path: private
+          persist-credentials: false
+
+      - name: Record exact private Nevada source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          {
+            echo "Private repository: $PRIVATE_REPO"
+            echo "Requested source ref: $PRIVATE_REF"
+            echo "Checked-out source commit: $(git -C private rev-parse HEAD)"
+            echo "Checked-out source subject: $(git -C private log -1 --format=%s)"
+            echo "Motorola kernel repository: MotorolaMobilityLLC/kernel-mtk"
+            echo "Motorola kernel branch: $SRC_BRANCH"
+            echo "Motorola kernel commit: $SRC_SHA"
+          } | tee reports/source-provenance.txt
+          test "$(git -C private rev-parse --is-inside-work-tree)" = true
+
+      - name: Test exact Nevada kernel release identity gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_nevada_*.py'
+
+      - name: Verify public runner capacity and initialize private reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+          if (( mem_kb < 14680064 )); then
+            echo "::error::Public runner has less than 16 GiB RAM; refusing an unsafe Full-LTO attempt."
+            exit 1
+          fi
+          mkdir -p reports out
+          echo 'DO NOT FLASH: experimental SUSFS + KernelSU-Next compilation, NOT a validated boot.img or flashable ZIP.' > reports/DO-NOT-FLASH.txt
+          test -s configs/nevada-stock.config.gz
+          gzip -t configs/nevada-stock.config.gz
+          gzip -dc configs/nevada-stock.config.gz > out/.config
+          grep -q '^CONFIG_MODULES=y$' out/.config
+          grep -q '^CONFIG_CC_IS_CLANG=y$' out/.config
+          cp device/device-baseline.txt reports/device.txt
+          sha256sum configs/nevada-stock.config.gz > reports/config-sha256.txt
+
+      - name: Install LLVM build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq > reports/apt-install.log 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            clang lld llvm make git bc bison flex gcc-aarch64-linux-gnu \
+            libssl-dev libelf-dev libncurses-dev dwarves cpio rsync \
+            python3 xz-utils zstd file >> reports/apt-install.log 2>&1
+          { clang --version; ld.lld --version; df -h .; } > reports/toolchain.txt 2>&1
+          echo "Build dependencies installed."
+
+      - name: Pin official Android Clang r450784e (14.0.7)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOL_DIR="$RUNNER_TEMP/android-llvm"
+          COMMIT=56fc36f789871f93ae5c6c038c76e5bf10b5d9a6
+          mkdir -p "$TOOL_DIR"
+          git -C "$TOOL_DIR" init -q
+          git -C "$TOOL_DIR" remote add origin \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          git -C "$TOOL_DIR" -c protocol.version=2 fetch --depth=1 \
+            --filter=blob:none origin "$COMMIT"
+          git -C "$TOOL_DIR" sparse-checkout init --cone
+          git -C "$TOOL_DIR" sparse-checkout set clang-r450784e
+          git -C "$TOOL_DIR" checkout --detach FETCH_HEAD
+          test "$(git -C "$TOOL_DIR" rev-parse HEAD)" = "$COMMIT"
+          CLANG_BIN="$TOOL_DIR/clang-r450784e/bin"
+          test -x "$CLANG_BIN/clang"
+          test -x "$CLANG_BIN/ld.lld"
+          "$CLANG_BIN/clang" --version > reports/clang14.txt 2>&1
+          "$CLANG_BIN/ld.lld" --version > reports/lld14.txt 2>&1
+          grep -Fq 'clang version 14.0.7' reports/clang14.txt
+          grep -Fq 'based on r450784e' reports/clang14.txt
+          grep -Eq '^LLD 14\.' reports/lld14.txt
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+          printf 'Android Clang repository commit: %s\n' "$COMMIT" \
+            > reports/clang-source.txt 2>&1
+
+      # This affects only GitHub's disposable VM, never the phone or its partitions.
+      - name: Prepare safe runner storage and optional LTO swap
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '=== Runner storage before cleanup ==='
+            df -h "$GITHUB_WORKSPACE"
+            echo '=== Remove unused preinstalled SDKs (CI VM only) ==='
+          } | tee reports/runner-memory-setup.txt
+          # Kernel cross-compile does not require .NET, Android SDK, GHC, or PowerShell.
+          for D in /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc /usr/local/share/powershell; do
+            if [ -d "$D" ]; then
+              echo "Removing unused runner SDK: $D" | tee -a reports/runner-memory-setup.txt
+              sudo rm -rf -- "$D"
+            fi
+          done
+          AVAIL_KB="$(df -Pk "$GITHUB_WORKSPACE" | awk 'END{print $4}')"
+          # Full-LTO previously exhausted 15 GiB swap on the 8 GiB runner.
+          # Use the public runner's larger disk to provide up to 28 GiB extra swap.
+          # Keep at least 8 GiB free for source, outputs, and diagnostics.
+          # This is a disposable CI runner only; do not change the phone.
+          SWAP_GB=0
+          if [ "$AVAIL_KB" -ge 37748736 ]; then
+            SWAP_GB=28
+          elif [ "$AVAIL_KB" -ge 33554432 ]; then
+            SWAP_GB=24
+          elif [ "$AVAIL_KB" -ge 29360128 ]; then
+            SWAP_GB=20
+          elif [ "$AVAIL_KB" -ge 25165824 ]; then
+            SWAP_GB=16
+          elif [ "$AVAIL_KB" -ge 20971520 ]; then
+            SWAP_GB=12
+          elif [ "$AVAIL_KB" -ge 16777216 ]; then
+            SWAP_GB=8
+          fi
+          if [ "$SWAP_GB" -gt 0 ]; then
+            FILE=/mnt/nevada-lto.swap
+            echo "Attempting ${SWAP_GB} GiB additional swap on disposable runner" | tee -a reports/runner-memory-setup.txt
+            if sudo fallocate -l "${SWAP_GB}G" "$FILE" &&
+               sudo chmod 600 "$FILE" &&
+               sudo mkswap "$FILE" &&
+               sudo swapon "$FILE"; then
+              echo "Additional swap enabled" | tee -a reports/runner-memory-setup.txt
+            else
+              echo "Additional swap unavailable; keeping existing runner swap" | tee -a reports/runner-memory-setup.txt
+              sudo swapoff "$FILE" 2>/dev/null || true
+              sudo rm -f "$FILE"
+            fi
+          else
+            echo 'Insufficient spare storage for safe extra swap; using existing swap' | tee -a reports/runner-memory-setup.txt
+          fi
+          {
+            echo '=== Memory and swap ==='
+            free -h
+            swapon --show || true
+            echo '=== Remaining storage ==='
+            df -h "$GITHUB_WORKSPACE"
+          } 2>&1 | tee -a reports/runner-memory-setup.txt
+          # Favor swap-backed LTO over abrupt runner memory-pressure termination.
+          sudo sysctl -w vm.swappiness=100 | tee -a reports/runner-memory-setup.txt
+
+      - name: Apply Nevada SUSFS patch and integrate pinned KernelSU-Next
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Read-only investigation and patching in GitHub runner ONLY.
+          bash ci/susfs/probe.sh > reports/susfs-probe.log 2>&1
+          ROOT="$RUNNER_TEMP/nevada-susfs"
+          test -s "$ROOT/kernel/fs/susfs.c"
+          test -s "$ROOT/kernel/include/linux/susfs_def.h"
+          test -f "$ROOT/KernelSU-Next/kernel/Kconfig"
+          test -d "$ROOT/kernel/drivers"
+          mv "$ROOT/kernel" kernel-5.15
+          ln -s "$ROOT/KernelSU-Next/kernel" kernel-5.15/drivers/kernelsu
+          if ! grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' kernel-5.15/drivers/Makefile; then
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel-5.15/drivers/Makefile
+          fi
+          if ! grep -Fq 'source "drivers/kernelsu/Kconfig"' kernel-5.15/drivers/Kconfig; then
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' kernel-5.15/drivers/Kconfig
+          fi
+          kernel-5.15/scripts/config --file out/.config --enable KSU --enable KSU_SUSFS
+          sha256sum "$ROOT/KernelSU-Next/kernel/Kconfig" kernel-5.15/fs/susfs.c > reports/susfs-implementation-sha256.txt
+          echo "EXPERIMENTAL: NOR FLASHABLE NOR ABI-APPROVED" |
+            tee reports/susfs-build-status.txt
+
+      - name: Expose SUSFS probe diagnostics when integration fails
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          echo "===== OUTER SUSFS PROBE LOG ====="
+          if [ -s reports/susfs-probe.log ]; then
+            cat reports/susfs-probe.log
+          else
+            echo "reports/susfs-probe.log is missing or empty"
+          fi
+          echo "===== INNER SUSFS PROBE LOG ====="
+          if [ -s reports/probe.log ]; then
+            cat reports/probe.log
+          else
+            echo "reports/probe.log is missing or empty"
+          fi
+          echo "===== KSU COMPATIBILITY REPORT ====="
+          if [ -s reports/ksu-next-compat-report.txt ]; then
+            cat reports/ksu-next-compat-report.txt
+          else
+            echo "Compatibility report was not produced"
+          fi
+          exit 0
+
+      - name: Generate verified 2902-name candidate KMI whitelist
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=kernel-5.15/android/abi_gki_aarch64_mtk
+          SUP=ci/kmi/nevada-kmi-supplement.txt
+          CRCS=ci/kmi/nevada-kmi-required-crcs.json
+          ADD=ci/kmi/nevada-kmi-v3-additional-required-crcs.json
+          RAW="$GITHUB_WORKSPACE/private/out/abi_symbollist.raw"
+          test -s "$SOURCE" && test -s "$SUP" && test -s "$CRCS" && test -s "$ADD"
+          printf '%s  %s\n' \
+            8b0141449ef2151701383dfcbb27bcb9fa4b0524bd9bf503dcff996794d4147a "$SUP" \
+            292f4a8aa9c2bd51b3d0734e260539a0640c628e217fb6f99d2b4d260d0621fa "$CRCS" \
+            23b4f403092d2c93b4d656a7b8f71aa45e60ed6e65a1ccd5892915240b7f01bb "$ADD" \
+            | sha256sum -c - > reports/private-input-checksums.txt 2>&1
+          python3 - "$SOURCE" "$SUP" "$CRCS" "$ADD" "$RAW" <<'PY' > reports/kmi-whitelist-build.log 2>&1
+          import configparser, hashlib, json, pathlib, re, sys
+          source, sup, crc_file, add_file, raw = map(pathlib.Path, sys.argv[1:])
+          p = configparser.ConfigParser(allow_no_value=True, strict=False)
+          p.optionxform = str
+          p.read(source)
+          base = set()
+          for section in p.sections():
+              if section.endswith(("whitelist", "symbol_list")):
+                  base.update(p[section].keys())
+          supplement = sup.read_text().splitlines()
+          required = json.loads(crc_file.read_text())
+          additional = json.loads(add_file.read_text())
+          if not (len(base) == 2651 and len(supplement) == 250
+                  and len(set(supplement)) == 250
+                  and not base.intersection(supplement)
+                  and set(required) == set(supplement)
+                  and all(re.fullmatch(r"0x[0-9a-fA-F]{8}", v)
+                          for v in required.values())):
+              raise SystemExit("Invalid or inconsistent Nevada supplement")
+          if additional != {"sock_create_kern": "0x883648f5"}:
+              raise SystemExit("Unexpected Nevada V3 additional CRC record")
+          if set(additional).intersection(base | set(supplement)):
+              raise SystemExit("V3 additional symbol duplicates an existing whitelist name")
+          combined = sorted(base | set(supplement) | set(additional))
+          if len(combined) != 2902:
+              raise SystemExit("Wrong candidate whitelist size")
+          raw.write_text("\n".join(combined) + "\n")
+          actual = hashlib.sha256(raw.read_bytes()).hexdigest()
+          if actual != "bcca6d5f897f702ee1180cb371e6dd979b558ced54cc34814705589fd36d9758":
+              raise SystemExit("Candidate whitelist SHA256 mismatch")
+          print("Verified base: 2651; supplement: 250; V3 additional: 1; total: 2902; sha256:", actual)
+          PY
+          kernel-5.15/scripts/config --file out/.config \
+            --enable TRIM_UNUSED_KSYMS \
+            --set-str UNUSED_KSYMS_WHITELIST "$RAW"
+          grep -F "CONFIG_UNUSED_KSYMS_WHITELIST=\"$RAW\"" out/.config \
+            > reports/kmi-whitelist.txt 2>&1
+          sha256sum "$SOURCE" "$SUP" "$CRCS" "$ADD" "$RAW" \
+            > reports/kmi-whitelist-sha256.txt 2>&1
+
+      - name: Enforce stock Full LTO selection before Kconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          kernel-5.15/scripts/config --file out/.config \
+            --disable LTO_CLANG_THIN --enable LTO_CLANG_FULL
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
+
+      - name: Derive build configuration from live Nevada config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp out/.config reports/config-before.txt
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
+            > reports/configure.log 2>&1
+
+          # Enforce the complete device uname -r value. A matching vermagic
+          # suffix does not make a different release prefix module-compatible.
+          EXPECTED_LOCALVERSION="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+          baseline = Path("device/device-baseline.txt").read_text()
+          release = next((line.split(":", 1)[1].strip()
+                          for line in baseline.splitlines()
+                          if line.startswith("Kernel:")), None)
+          if not release:
+              raise SystemExit("Kernel release missing from device baseline")
+          makefile = Path("kernel-5.15/Makefile").read_text()
+          parts = []
+          for key in ("VERSION", "PATCHLEVEL", "SUBLEVEL"):
+              match = re.search(rf"^{key}\s*=\s*(\d+)\s*$",
+                                makefile, re.MULTILINE)
+              if not match:
+                  raise SystemExit(f"{key} missing from kernel Makefile")
+              parts.append(match.group(1))
+          base = ".".join(parts)
+          if not release.startswith(base):
+              raise SystemExit(f"Device release {release!r} does not match source base {base!r}")
+          print(release[len(base):])
+          PY
+          )"
+          kernel-5.15/scripts/config --file out/.config \
+            --set-str LOCALVERSION "$EXPECTED_LOCALVERSION" \
+            --disable LOCALVERSION_AUTO
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig \
+            > reports/configure-release-identity.log 2>&1
+
+          # Synchronize generated Kconfig metadata before kernelrelease.
+          # kernelrelease reads include/config/auto.conf, not just .config.
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 syncconfig \
+            > reports/configure-syncconfig.log 2>&1
+          grep -Fqx 'CONFIG_LOCALVERSION="-android13-8-00018-g9b2308ac0ad6-ab14563692"' \
+            out/include/config/auto.conf
+          if grep -qx 'CONFIG_LOCALVERSION_AUTO=y' out/include/config/auto.conf; then
+            echo 'FAIL: generated auto.conf still enables CONFIG_LOCALVERSION_AUTO' >&2
+            exit 1
+          fi
+          {
+            echo '=== Effective generated Kconfig release settings ==='
+            grep -E '^CONFIG_LOCALVERSION(=|_AUTO=)' out/include/config/auto.conf || true
+            echo '=== Source .config release settings ==='
+            grep -E '^CONFIG_LOCALVERSION=|^# CONFIG_LOCALVERSION_AUTO' out/.config
+          } > reports/release-kconfig-sync.txt
+          ACTUAL_KERNEL_RELEASE="$(make -s -C kernel-5.15 \
+            O="$GITHUB_WORKSPACE/private/out" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            kernelrelease LOCALVERSION=)"
+          python3 tools/nevada-kernel-release-identity.py \
+            --baseline device/device-baseline.txt \
+            --kernel-makefile kernel-5.15/Makefile \
+            --config out/.config \
+            --actual-release "$ACTUAL_KERNEL_RELEASE" \
+            --source-tree kernel-5.15 --objtree out \
+            --output reports/kernel-release-identity.json
+          printf 'LOCALVERSION=\n' >> "$GITHUB_ENV"
+          diff -u reports/config-before.txt out/.config > reports/config-diff.txt || true
+          cp out/.config reports/config-after.txt
+          grep -qx 'CONFIG_CLANG_VERSION=140007' out/.config
+          grep -qx 'CONFIG_LTO_CLANG_FULL=y' out/.config
+          grep -qx '# CONFIG_LTO_CLANG_THIN is not set' out/.config
+          grep -qx 'CONFIG_KSU=y' out/.config
+          grep -qx 'CONFIG_KSU_SUSFS=y' out/.config
+          grep -qx 'CONFIG_MODVERSIONS=y' out/.config
+          grep -qx 'CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
+          echo 'Stock LLVM 14.0.7, Full LTO and symbol versioning selected' \
+            > reports/strict-config-check.txt 2>&1
+
+      - name: Record pre-compilation resource diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          { date -u; uname -a; free -h; df -h "$GITHUB_WORKSPACE"; nproc; } > reports/resources-before-build.txt 2>&1
+          sha256sum out/.config > reports/compiled-config-sha256.txt
+          grep -E '^CONFIG_(LTO|LTO_CLANG|LTO_CLANG_THIN|CFI_CLANG|MODVERSIONS|MODULE_SIG|TRIM_UNUSED_KSYMS)=' out/.config \
+            > reports/lto-kmi-config.txt
+          test -s reports/kmi-whitelist.txt
+          test -s reports/config-after.txt
+
+      - name: Compile and verify KernelSU SELinux fallback object before full link
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJ="out/drivers/kernelsu/feature/selinux_hide.o"
+          REPORT="reports/selinux-hide-object-symbols.txt"
+          mkdir -p reports
+          echo "Generating the SELinux headers through the registered Kbuild directory."
+          # flask.h is a directory-local Kbuild target in security/selinux/Makefile;
+          # it is not a top-level make goal. Build the top-level security directory
+          # so Kbuild descends through security/Makefile, loads the SELinux rules,
+          # and generates flask.h plus av_permissions.h using genheaders.
+          grep -qx 'CONFIG_SECURITY_SELINUX=y' out/.config
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 \
+            security \
+            > reports/selinux-generated-headers-build.log 2>&1
+          test -s out/security/selinux/flask.h
+          test -s out/security/selinux/av_permissions.h
+          {
+            echo "Generated headers:"
+            sha256sum out/security/selinux/flask.h out/security/selinux/av_permissions.h
+          } | tee reports/selinux-generated-headers-verdict.txt
+
+          echo "Compiling only the KernelSU SELinux-hide translation unit."
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 -j1 \
+            drivers/kernelsu/feature/selinux_hide.o \
+            > reports/selinux-hide-object-build.log 2>&1
+          test -s "$OBJ"
+          NM="$(command -v llvm-nm || true)"
+          if [[ -z "$NM" ]]; then
+            echo "::error::llvm-nm is unavailable; refusing to skip compiled-symbol verification."
+            exit 1
+          fi
+          "$NM" --defined-only --extern-only "$OBJ" | tee "$REPORT"
+          for symbol in my_setprocattr my_write_context my_write_access; do
+            if ! awk -v wanted="$symbol" '$2 == "T" && $3 == wanted { found=1 } END { exit !found }' "$REPORT"; then
+              echo "::error::Missing global text definition in selinux_hide.o: $symbol"
+              exit 1
+            fi
+            echo "PASS: global text definition verified: $symbol"
+          done | tee reports/selinux-hide-object-verdict.txt
+          sha256sum "$OBJ" | tee reports/selinux-hide-object-sha256.txt
+          {
+            echo "Object: $OBJ"
+            echo "Compiler: $(clang --version | head -n 1)"
+            echo "Verifier: $NM"
+            echo "Required global text symbols: 3/3"
+            echo "Full kernel link: NOT YET PERFORMED"
+            echo "Flash approval: NO"
+          } | tee reports/selinux-hide-object-summary.txt
+
+      - name: Attempt kernel image compilation with bounded LTO parallelism
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Keep the stock LTO config; reduce ld.lld memory pressure instead.
+          LINKER='ld.lld --threads=1'
+          echo "Starting bounded Full-LTO kernel image build."
+          echo "Full LTO retained; linker parallelism remains one; make parallelism reduced to -j1 to limit peak build memory." > reports/linker-settings.txt
+          { ld.lld --version; free -h; df -h "$GITHUB_WORKSPACE"; } >> reports/linker-settings.txt 2>&1
+          # Periodic diagnostic output is streamed to Actions logs even if the runner disappears.
+          (
+            while true; do
+              echo "===== RESOURCE HEARTBEAT $(date -u) ====="
+              free -m
+              df -h "$GITHUB_WORKSPACE"
+              ps -eo pid,comm,rss,etime --sort=-rss | head -n 12
+              if [ -r /sys/fs/cgroup/memory.events ]; then cat /sys/fs/cgroup/memory.events; fi
+              sleep 120
+            done
+          ) > reports/resources-live.log 2>&1 &
+          WATCH_PID=$!
+          trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
+          echo "Starting Image.gz-only test at $(date -u)" > reports/build-summary.txt
+          timeout -s TERM -k 30s 100m \
+            make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+              ARCH=arm64 LLVM=1 LLVM_IAS=1 LD="$LINKER" -j1 Image.gz \
+              > reports/build.log 2>&1
+          rc=${PIPESTATUS[0]}
+          {
+            echo "Image compile exit status: $rc"
+            date -u
+            free -h
+            df -h "$GITHUB_WORKSPACE"
+            if [ -r /sys/fs/cgroup/memory.events ]; then cat /sys/fs/cgroup/memory.events; fi
+          } >> reports/build-summary.txt 2>&1
+          if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -eq 124 ]; then
+              echo 'Image compilation exceeded 100-minute command limit' | tee -a reports/build-summary.txt
+            fi
+            exit "$rc"
+          fi
+          test -s out/arch/arm64/boot/Image.gz || exit 3
+          sha256sum out/arch/arm64/boot/Image.gz > reports/image-sha256.txt
+
+      - name: Build configured modules and generate Module.symvers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Image.gz alone does not guarantee Module.symvers is generated.
+          # The modules target runs modpost against this exact configured vmlinux
+          # and emits the export/CRC table consumed by the following KMI gate.
+          test -s out/vmlinux
+          grep -qx 'CONFIG_MODULES=y' out/.config
+          grep -qx 'CONFIG_MODVERSIONS=y' out/.config
+          make -C kernel-5.15 O="$GITHUB_WORKSPACE/private/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 LD='ld.lld --threads=1' -j1 modules \
+            > reports/modules-build.log 2>&1
+          test -s out/Module.symvers || {
+            echo "::error::modules target completed without producing out/Module.symvers."
+            exit 1
+          }
+          vmlinux_exports="$(awk '$3 == "vmlinux" { count++ } END { print count+0 }' out/Module.symvers)"
+          if [ "$vmlinux_exports" -eq 0 ]; then
+            echo "::error::Module.symvers contains no vmlinux-owned exports."
+            exit 1
+          fi
+          {
+            echo "Module build: PASS"
+            echo "Module.symvers: out/Module.symvers"
+            echo "Total records: $(wc -l < out/Module.symvers)"
+            echo "vmlinux-owned exports: $vmlinux_exports"
+            sha256sum out/Module.symvers
+          } | tee reports/module-symvers-verdict.txt
+
+      - name: Compare 251 required CRCs against new vmlinux
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > reports/nevada-251-kmi-crc-validation.txt 2>&1
+          import json, pathlib
+          required = json.loads(pathlib.Path("ci/kmi/nevada-kmi-required-crcs.json").read_text())
+          additional = json.loads(pathlib.Path("ci/kmi/nevada-kmi-v3-additional-required-crcs.json").read_text())
+          if set(required).intersection(additional):
+              raise SystemExit("FAIL: duplicate symbols across KMI CRC manifests")
+          required.update(additional)
+          symvers = pathlib.Path("out/Module.symvers")
+          if not symvers.is_file():
+              raise SystemExit("FAIL: Module.symvers missing")
+          exports = {}
+          for line in symvers.read_text().splitlines():
+              parts = line.split()
+              if len(parts) < 4:
+                  raise SystemExit("FAIL: malformed Module.symvers")
+              crc, name, owner = parts[:3]
+              if owner == "vmlinux" and name in required:
+                  if name in exports:
+                      raise SystemExit("FAIL: duplicate vmlinux export: " + name)
+                  exports[name] = crc.lower()
+          missing = sorted(set(required) - set(exports))
+          differing = sorted(n for n in required if n in exports
+                             and int(required[n], 16) != int(exports[n], 16))
+          print("Required supplemental exports:", len(required))
+          print("Present in vmlinux Module.symvers:", len(exports))
+          print("Missing:", len(missing))
+          print("CRC mismatches:", len(differing))
+          print("First missing:", missing[:25])
+          print("First mismatches:", differing[:25])
+          if len(required) != 251 or missing or differing:
+              raise SystemExit("FAIL: candidate kernel is not stock KMI compatible")
+          print("PASS: all 251 required vmlinux exports and CRCs match stock consumers")
+          PY
+
+      - name: Write final build-stage verdict
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          image_pass=NO
+          modules_pass=NO
+          kmi_pass=NO
+          susfs_pass=NO
+          if grep -Fq 'Image compile exit status: 0' reports/build-summary.txt 2>/dev/null && test -s out/arch/arm64/boot/Image.gz; then image_pass=YES; fi
+          if grep -Fq 'Module build: PASS' reports/module-symvers-verdict.txt 2>/dev/null; then modules_pass=YES; fi
+          if grep -Fq 'PASS: all 251 required vmlinux exports and CRCs match stock consumers' reports/nevada-251-kmi-crc-validation.txt 2>/dev/null; then kmi_pass=YES; fi
+          if grep -Fq 'PASS: applied exactly one sus_path SRCU iterator correction' reports/susfs-probe.log 2>/dev/null; then susfs_pass=YES; fi
+          overall=PASS
+          if [[ "$image_pass" != YES || "$modules_pass" != YES || "$kmi_pass" != YES || "$susfs_pass" != YES ]]; then overall=INCOMPLETE_OR_FAILED; fi
+          {
+            echo "Device: Motorola XT2615-1 (nevada)"
+            echo "Firmware baseline: W1WNS36.18-114-1"
+            echo "Kernel source: 0fa176ca7f56c349b51acd83684284c02ced5854"
+            echo "SUSFS SRCU correction: $susfs_pass"
+            echo "Kernel Image.gz compilation: $image_pass"
+            echo "Configured modules / Module.symvers: $modules_pass"
+            echo "251 supplemental vmlinux KMI CRC gate (includes sock_create_kern): $kmi_pass"
+            echo "Build-stage verdict: $overall"
+            echo "Full 371-stock-module closure: external post-build audit; not executed by this CI workflow"
+            echo "Boot image packaging / boot validation: NOT PERFORMED"
+            echo "AVB authentication: NOT SATISFIED"
+            echo "Flash approval: NO"
+            echo "DO_NOT_FLASH: YES"
+          } | tee reports/verdict.txt
+          if [[ "$overall" != PASS ]]; then echo "::warning::One or more build-stage gates did not pass; inspect reports/verdict.txt and detailed logs."; fi
+
+      # No public workflow artifacts: detailed logs and images go to the private repository only.
+      - name: Deliver experimental outputs and diagnostics ONLY to private draft release
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NEVADA_KERNEL_PRIVATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing private delivery token."
+            exit 1
+          fi
+          mkdir -p reports out
+          python3 - <<'PY'
+          import hashlib, os, zipfile
+          from pathlib import Path
+          root = Path(".")
+          # Preserve the exact modules produced by this build for private ELF/ABI review.
+          module_paths = [
+              "drivers/block/zram/zram.ko",
+              "drivers/misc/mediatek/et/mtk_et.ko",
+              "mm/zsmalloc.ko",
+              "sound/soc/codecs/mt6359p-accdet.ko",
+          ]
+          module_files = [(name, root / "out" / name) for name in module_paths]
+          missing_modules = [name for name, path in module_files if not path.is_file() or path.stat().st_size == 0]
+          module_zip = root / "PRIVATE-nevada-built-modules.zip"
+          module_status = root / "reports" / "built-modules-artifact-status.txt"
+          if missing_modules:
+              module_status.write_text(
+                  "MODULE ARTIFACT INCOMPLETE; no module archive created.\n"
+                  + "Missing or empty modules:\n"
+                  + "\n".join(missing_modules) + "\n"
+              )
+              module_zip = None
+          else:
+              lines = [
+                  "Motorola XT2615-1 (nevada) compiled-module audit bundle",
+                  "Firmware baseline: W1WNS36.18-114-1",
+                  "Kernel source commit: " + os.environ["SRC_SHA"],
+                  "Kernel source branch: " + os.environ["SRC_BRANCH"],
+                  "Build run: " + os.environ["GITHUB_RUN_ID"],
+                  "Kernel release: " + (root / "out/include/config/kernel.release").read_text().strip(),
+                  "Compiler: " + (root / "reports/clang14.txt").read_text().splitlines()[0],
+                  "Config SHA-256: " + hashlib.sha256((root / "out/.config").read_bytes()).hexdigest(),
+                  "Module.symvers SHA-256: " + hashlib.sha256((root / "out/Module.symvers").read_bytes()).hexdigest(),
+                  "",
+                  "SHA256  SIZE_BYTES  MODULE_PATH",
+              ]
+              for name, path in module_files:
+                  data = path.read_bytes()
+                  lines.append(f"{hashlib.sha256(data).hexdigest()}  {len(data)}  {name}")
+              manifest = "\n".join(lines) + "\n"
+              (root / "reports" / "built-modules-manifest.txt").write_text(manifest)
+              with zipfile.ZipFile(module_zip, "w", zipfile.ZIP_DEFLATED) as z:
+                  z.writestr("MANIFEST.txt", manifest)
+                  for name, path in module_files:
+                      z.write(path, "modules/" + name)
+                  for name in [
+                      "out/.config",
+                      "out/Module.symvers",
+                      "out/include/config/kernel.release",
+                      "reports/clang14.txt",
+                      "reports/modules-build.log",
+                      "reports/module-symvers-verdict.txt",
+                  ]:
+                      p = root / name
+                      if p.is_file():
+                          z.write(p, "metadata/" + name.removeprefix("out/").removeprefix("reports/"))
+              module_status.write_text(
+                  "PASS: all four requested compiled modules were archived.\n"
+                  + "Archive: " + module_zip.name + "\n"
+                  + "Manifest: reports/built-modules-manifest.txt\n"
+              )
+          report_zip = root / "PRIVATE-nevada-build-diagnostics.zip"
+          with zipfile.ZipFile(report_zip, "w", zipfile.ZIP_DEFLATED) as z:
+              z.writestr("DO-NOT-FLASH.txt", "Private experimental diagnostics. Not a validated kernel release.\n")
+              for p in sorted((root / "reports").rglob("*")):
+                  if p.is_file():
+                      z.write(p, p.relative_to(root))
+          output_zip = root / "PRIVATE-nevada-SUSFS-EXPERIMENTAL-DO-NOT-FLASH.zip"
+          candidates = [
+              "out/arch/arm64/boot/Image.gz", "out/Module.symvers",
+              "out/vmlinux.symvers", "out/System.map", "out/.config",
+              "out/abi_symbollist.raw", "out/include/generated/autoksyms.h",
+              "out/include/config/kernel.release"
+          ]
+          with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as z:
+              z.writestr("DO-NOT-FLASH.txt",
+                         "EXPERIMENTAL ONLY. Not boot-tested, not a flashable ZIP, and not approved for device use.\n")
+              for name in candidates:
+                  p = root / name
+                  if p.is_file():
+                      z.write(p, name)
+          assets = [str(report_zip), str(output_zip)]
+          if module_zip is not None:
+              assets.append(str(module_zip))
+          for name in list(assets):
+              p = Path(name)
+              digest = hashlib.sha256(p.read_bytes()).hexdigest()
+              Path(name + ".sha256").write_text(f"{digest}  {p.name}\n")
+              assets.append(name + ".sha256")
+          notes = Path("PRIVATE-RELEASE-NOTES.txt")
+          notes.write_text(
+              "Nevada XT2615-1 SUSFS + KernelSU-Next experimental build.\n"
+              f"Public builder run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}\n"
+              "All detailed diagnostics and build outputs are attached to this PRIVATE draft release.\n"
+              "When all four expected module outputs exist, PRIVATE-nevada-built-modules.zip contains the compiled .ko files and SHA-256 manifest.\n"
+              "DO NOT FLASH: boot compatibility, module ABI, and device validation are not complete.\n"
+          )
+          tag = "nevada-susfs-public-private-" + os.environ["GITHUB_RUN_ID"]
+          import subprocess
+          subprocess.run([
+              "gh", "release", "create", tag, "-R", os.environ["PRIVATE_REPO"],
+              "--target", os.environ["PRIVATE_REF"], "--draft",
+              "--title", "Nevada SUSFS EXPERIMENTAL " + os.environ["GITHUB_RUN_ID"],
+              "--notes-file", str(notes), *assets
+          ], check=True, stdout=subprocess.DEVNULL)
+          print("Private draft release delivery completed.")
+          PY

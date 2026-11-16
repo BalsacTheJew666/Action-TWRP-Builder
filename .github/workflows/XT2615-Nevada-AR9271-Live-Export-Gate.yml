@@ -1,0 +1,68 @@
+name: XT2615-1 Nevada - AR9271 Live Export Blocker Preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-AR9271-Live-Export-Gate.yml'
+      - 'scripts/nevada-ar9271-export-gate.py'
+      - 'NEVADA-AR9271-LIVE-EXPORT-FINDINGS.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-export-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-and-official-export-preflight:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      MOTO_BRANCH: android-16-release-w1wn36.18-114
+      MOTO_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+      GKI_SYMVERS_URL: https://ci.android.com/builds/submitted/14563692/kernel_aarch64/latest/raw/vmlinux.symvers
+      STOCK_CONFIG_SHA256: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+    steps:
+      - name: Checkout scripts, read-only reference config, and analysis
+        uses: actions/checkout@v4
+
+      - name: Verify exact stock config and analyzer syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$STOCK_CONFIG_SHA256  ci/xt2615-nevada-stock.config" | sha256sum -c -
+          python3 -m py_compile scripts/nevada-ar9271-export-gate.py
+
+      - name: Get authentic public source and official GKI 14563692 exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --filter=blob:none --single-branch \
+            --branch "$MOTO_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/moto-source"
+          test "$(git -C "$RUNNER_TEMP/moto-source" rev-parse HEAD)" = "$MOTO_SHA"
+          curl -fLSs --retry 2 --connect-timeout 15 --max-time 120 \
+            "$GKI_SYMVERS_URL" -o "$RUNNER_TEMP/official-vmlinux.symvers"
+
+      - name: Check exact source dependencies and GKI export presence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/nevada-ar9271-export-gate.py \
+            "$RUNNER_TEMP/moto-source" \
+            ci/xt2615-nevada-stock.config \
+            "$RUNNER_TEMP/official-vmlinux.symvers" \
+            "$RUNNER_TEMP/results"
+
+      - name: Upload text-only dependency report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-AR9271-LIVE-EXPORT-BLOCKER-RESEARCH
+          path: ${{ runner.temp }}/results/nevada-AR9271-live-export-gate.json
+          if-no-files-found: warn
+          retention-days: 14

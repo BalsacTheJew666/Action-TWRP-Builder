@@ -1,0 +1,34 @@
+name: XT2615-1 Nevada - 264 Owner ELF CRC Gate Selftest
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-264-Owner-ELF-CRC-Gate.yml'
+      - 'scripts/nevada-264-owner-elf-private-crc-gate.py'
+      - 'ci/nevada-264-owner-elf-private-crc-selftest.py'
+      - 'NEVADA-264-OWNER-ELF-CRC-GATE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-privacy-preserving-gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public code only
+        uses: actions/checkout@v4
+      - name: Syntax and synthetic classification tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/nevada-264-owner-elf-private-crc-gate.py \
+            ci/nevada-264-owner-elf-private-crc-selftest.py \
+            scripts/nevada-ar9271-live-core-kmi-witness.py \
+            scripts/nevada-vendor-export-provider-local.py
+          python3 ci/nevada-264-owner-elf-private-crc-selftest.py
+          echo "TEST PASSED using entirely synthetic in-memory reports."
+          echo "NO proprietary vendor ELF, device data, secrets or private report uploaded."

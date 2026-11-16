@@ -1,0 +1,55 @@
+name: XT2615-1 Nevada - Read-only Stock Vendor KMI Import Inventory
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/nevada-stock-vendor-kmi-import-inventory.py'
+      - 'ci/nevada-stock-vendor-kmi-inventory-selftest.py'
+      - '.github/workflows/XT2615-Nevada-Stock-Vendor-KMI-Inventory.yml'
+      - 'NEVADA-STOCK-VENDOR-KMI-INVENTORY.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-end-to-end-qa:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout READ-ONLY scripts
+        uses: actions/checkout@v4
+      - name: Validate syntax and realistic ELF input cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/nevada-stock-vendor-kmi-import-inventory.py \
+            scripts/nevada-ar9271-live-core-kmi-witness.py \
+            ci/nevada-stock-vendor-kmi-inventory-selftest.py
+          python3 ci/nevada-stock-vendor-kmi-inventory-selftest.py
+      - name: Validate the actual public exact-build reference's symbol count
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fLSs --retry 2 --connect-timeout 15 --max-time 90 \
+            'https://ci.android.com/builds/submitted/14563692/kernel_aarch64/latest/raw/vmlinux.symvers' \
+            -o "$RUNNER_TEMP/official-vmlinux.symvers"
+          python3 - "$RUNNER_TEMP/official-vmlinux.symvers" <<'PY'
+          import importlib.util, pathlib, sys
+          p=pathlib.Path("scripts/nevada-stock-vendor-kmi-import-inventory.py")
+          spec=importlib.util.spec_from_file_location("inventory",p)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          x=mod.official_core_exports(pathlib.Path(sys.argv[1]))
+          assert len(x)==8471
+          assert "usb_get_urb" not in x
+          assert "rfkill_pause_polling" not in x
+          print("PASS: exact public GKI 14563692 core exports:",len(x))
+          PY
+      - name: Confirm no device changes, kernel builds, vendor binaries or private data
+        shell: bash
+        run: |
+          echo 'Only local metadata inventory: no insmod, no flash, no kernel patch, no uploading private vendor .ko'
+          echo 'Normal-boot on-phone examination is separate and user-initiated.'

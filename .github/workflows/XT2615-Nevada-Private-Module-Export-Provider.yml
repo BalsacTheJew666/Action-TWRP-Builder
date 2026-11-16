@@ -1,0 +1,39 @@
+name: XT2615-1 Nevada - Private Module Export Provider Audit Selftest
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-Private-Module-Export-Provider.yml'
+      - 'scripts/nevada-vendor-export-provider-local.py'
+      - 'ci/nevada-vendor-export-provider-local-e2e.py'
+      - 'scripts/nevada-ar9271-live-core-kmi-witness.py'
+      - 'NEVADA-PRIVATE-MODULE-EXPORT-PROVIDERS.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provider-classification-no-phone:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    steps:
+      - name: Check out only analysis code
+        uses: actions/checkout@v4
+
+      - name: Verify Python parser and run complete synthetic ELF regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/nevada-vendor-export-provider-local.py \
+            ci/nevada-vendor-export-provider-local-e2e.py \
+            scripts/nevada-ar9271-live-core-kmi-witness.py
+          python3 ci/nevada-vendor-export-provider-local-e2e.py
+
+      - name: Confirm device/private data never used in hosted CI
+        run: |
+          echo "Only synthetic ELF test vectors were created in temporary runner space."
+          echo "No device, vendor-private JSON or .ko, boot image, private firmware or root access."
+          echo "No flash or module installation is supported by this workflow."

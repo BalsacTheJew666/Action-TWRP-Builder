@@ -1,0 +1,139 @@
+name: XT2615-1 Nevada - AR9271 8473 Public KMI Superset Compile
+
+# Device-safe research-only build. NO boot, vendor_boot or recovery is produced.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-AR9271-8473-Superset-Compile.yml'
+      - 'scripts/nevada-ar9271-public-superset-compile.sh'
+      - 'scripts/nevada-ar9271-public-gki-superset.py'
+      - 'ci/nevada-ar9271-core-kmi.tsv'
+      - 'ci/nevada-stock-wifi-vs-ath9k-htc-crcs.csv'
+      - 'ci/xt2615-nevada-stock.config'
+      - 'NEVADA-AR9271-8473-SUPERSET-COMPILE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevada-ar9271-public-superset-compile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  experimental-nonflashable-kernel-driver-compile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 160
+    env:
+      MOTO_BRANCH: android-16-release-w1wn36.18-114
+      MOTO_SHA: 0fa176ca7f56c349b51acd83684284c02ced5854
+      STOCK_CONFIG_SHA: e3cdaf997a7e2eb70e441944bdfd9af359aa82e8a2d5cb9534d2bce5fcd4a78a
+      OFFICIAL_GKI_URL: https://ci.android.com/builds/submitted/14563692/kernel_aarch64/latest/raw/vmlinux.symvers
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout verified public scripts and stock source config
+        uses: actions/checkout@v4
+
+      - name: Confirm pinned Kconfig, manifest, and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$STOCK_CONFIG_SHA  ci/xt2615-nevada-stock.config" | sha256sum -c -
+          bash -n scripts/nevada-ar9271-public-superset-compile.sh
+          python3 -m py_compile scripts/nevada-ar9271-public-gki-superset.py \
+            scripts/nevada-ar9271-testmode-crc-audit.py
+          test -s ci/nevada-stock-wifi-vs-ath9k-htc-crcs.csv
+
+      - name: Free runner storage and install kernel build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift || true
+          sudo apt-get clean
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make bc bison flex libssl-dev libelf-dev dwarves \
+            python3 git rsync cpio xz-utils zstd lz4 file
+          clang --version | head -1
+          free -h
+          df -h /
+
+      - name: Produce the exact official-public 8473 export-name research list
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 2 \
+            --connect-timeout 15 --max-time 120 \
+            "$OFFICIAL_GKI_URL" -o "$RUNNER_TEMP/official-14563692-vmlinux.symvers"
+          python3 scripts/nevada-ar9271-public-gki-superset.py \
+            "$RUNNER_TEMP/official-14563692-vmlinux.symvers" \
+            ci/nevada-ar9271-core-kmi.tsv \
+            "$RUNNER_TEMP/kmi-public"
+          test "$(wc -l < "$RUNNER_TEMP/kmi-public/PUBLIC-GKI-ALL-EXPORTS-PLUS-TWO-NOT-VENDOR-COMPLETE.symbollist")" -eq 8473
+
+      - name: Clone only SHA-verified public Motorola source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --single-branch --filter=blob:none \
+            -b "$MOTO_BRANCH" \
+            https://github.com/MotorolaMobilityLLC/kernel-mtk.git \
+            "$RUNNER_TEMP/nevada-source"
+          test "$(git -C "$RUNNER_TEMP/nevada-source" rev-parse HEAD)" = "$MOTO_SHA"
+
+      - name: Compile experimental kernel and four AR9271 driver modules under real export trimming
+        shell: bash
+        timeout-minutes: 130
+        env:
+          KERNEL_DIR: ${{ runner.temp }}/nevada-source
+          OUT_DIR: ${{ runner.temp }}/nevada-public-export-out
+          REFERENCE_CONFIG: ${{ github.workspace }}/ci/xt2615-nevada-stock.config
+          STOCK_REFERENCE_CSV: ${{ github.workspace }}/ci/nevada-stock-wifi-vs-ath9k-htc-crcs.csv
+          CRC_AUDIT_SCRIPT: ${{ github.workspace }}/scripts/nevada-ar9271-testmode-crc-audit.py
+          KMI_RESEARCH_SUPERSET: ${{ runner.temp }}/kmi-public/PUBLIC-GKI-ALL-EXPORTS-PLUS-TWO-NOT-VENDOR-COMPLETE.symbollist
+        run: |
+          set -euo pipefail
+          echo "::notice::This is a source-only PUBLIC-GKI research build, not the complete Motorola stock ABI or a flashable kernel."
+          monitor() {
+            while :; do
+              echo "===== CI resources $(date -u +%FT%TZ) ====="
+              free -m
+              df -h "$RUNNER_TEMP" | tail -1
+              sleep 90
+            done
+          }
+          monitor &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          bash scripts/nevada-ar9271-public-superset-compile.sh 2>&1 |
+            tee "$RUNNER_TEMP/nevada-public-kmi-compile.log"
+
+      - name: Upload TEXT-ONLY ABI research evidence, not image/modules
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-AR9271-8473-PUBLIC-KMI-REBUILD-NOT-INSTALLABLE
+          path: |
+            ${{ runner.temp }}/kmi-public/PUBLIC-GKI-SUPERSET-ABIGATE.json
+            ${{ runner.temp }}/kmi-public/README-NEVER-FLASH.txt
+            ${{ runner.temp }}/nevada-public-export-out/stock-abi-audit/crc-results.txt
+            ${{ runner.temp }}/nevada-public-export-out/stock-abi-audit/reconstructed-export-proof.json
+            ${{ runner.temp }}/nevada-public-export-out/stock-abi-audit/all-imports-crc-audit.json
+            ${{ runner.temp }}/nevada-public-export-out/stock-abi-audit/all-imports-summary.txt
+            ${{ runner.temp }}/nevada-public-export-out/stock-abi-audit/kernelrelease.txt
+            ${{ runner.temp }}/nevada-public-export-out/stock-abi-audit/README-NOT-INSTALLABLE.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve compiler log for failed or successful research
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nevada-AR9271-8473-PUBLIC-KMI-COMPILER-LOG
+          path: ${{ runner.temp }}/nevada-public-kmi-compile.log
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,33 @@
+name: XT2615-1 Nevada - 264 Unresolved Vendor Export Name Triage Selftest
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/XT2615-Nevada-264-Unresolved-Export-Triage.yml'
+      - 'scripts/nevada-264-unresolved-live-export-triage.py'
+      - 'ci/nevada-264-unresolved-live-export-triage-selftest.py'
+      - 'NEVADA-264-UNRESOLVED-PRIVATE-EXPORT-TRIAGE.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-privacy-audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public code only
+        uses: actions/checkout@v4
+
+      - name: Verify syntax for read-only private triage
+        run: |
+          python3 -m py_compile \
+            scripts/nevada-264-unresolved-live-export-triage.py \
+            ci/nevada-264-unresolved-live-export-triage-selftest.py
+
+      - name: Exercise full synthetic report and owner classifications
+        run: |
+          python3 ci/nevada-264-unresolved-live-export-triage-selftest.py
+          echo "Only synthetic inputs and public scripts used. No live device, private KMI or kernel exports were uploaded."
