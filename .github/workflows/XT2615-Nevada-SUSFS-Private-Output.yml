@@ -38,6 +38,22 @@ jobs:
           path: private
           persist-credentials: false
 
+      - name: Record exact private Nevada source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          {
+            echo "Private repository: $PRIVATE_REPO"
+            echo "Requested source ref: $PRIVATE_REF"
+            echo "Checked-out source commit: $(git -C private rev-parse HEAD)"
+            echo "Checked-out source subject: $(git -C private log -1 --format=%s)"
+            echo "Motorola kernel repository: MotorolaMobilityLLC/kernel-mtk"
+            echo "Motorola kernel branch: $SRC_BRANCH"
+            echo "Motorola kernel commit: $SRC_SHA"
+          } | tee reports/source-provenance.txt
+          test "$(git -C private rev-parse --is-inside-work-tree)" = true
+
       - name: Test exact Nevada kernel release identity gate
         shell: bash
         run: |
